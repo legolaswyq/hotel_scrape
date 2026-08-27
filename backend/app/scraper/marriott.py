@@ -52,6 +52,16 @@ PROPERTY_CARD_SPLIT = 'class=" property-card"'
 DATA_PROPERTY_RE = re.compile(r'data-property="([^"]+)"')
 DISPLAYED_PRICE_RE = re.compile(r'aria-label="\s*now\s*([\d,]+)\s*"')
 
+# Matches a rate-plan card's name and its two price spans: the tax-inclusive
+# price (in a `d-none` span, hidden unless "show with taxes and fees" is on)
+# followed by the pre-tax base price. Used by marriott_prepay.py to read a
+# specific rate plan's price after expanding a room's "View Rates" panel.
+RATE_CARD_RE = re.compile(
+    r'rate-name">([^<]+)</span>.*?class="d-none">([\d,]+)</span>'
+    r'<span aria-hidden="false" class="">([\d,]+)</span>',
+    re.S,
+)
+
 _PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile"
 
 
@@ -74,6 +84,24 @@ def _build_search_url(req: SearchRequest) -> str:
         rooms=req.rooms,
         adults=req.adults,
     )
+
+
+def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
+    """Return (marshacode, hotelName) for each result card, in listed order."""
+    codes: list[tuple[str, str]] = []
+    for chunk in page_html.split(PROPERTY_CARD_SPLIT)[1:]:
+        prop_match = DATA_PROPERTY_RE.search(chunk)
+        if not prop_match:
+            continue
+        try:
+            data = json.loads(html.unescape(prop_match.group(1)))
+        except json.JSONDecodeError:
+            continue
+        code = data.get("marshacode")
+        name = data.get("hotelName")
+        if code and name:
+            codes.append((code, name))
+    return codes
 
 
 def _extract_hotels(page_html: str, nights: int) -> list[Hotel]:

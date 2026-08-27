@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hotel Scrape — Marriott</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    form { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
+    label { display: flex; flex-direction: column; font-size: 0.85rem; }
+    input { padding: 0.4rem; font-size: 1rem; }
+    button { grid-column: span 2; padding: 0.6rem; font-size: 1rem; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
+    th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
+    #error { color: #b00020; margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <h1>Find a Marriott Room</h1>
+  <form id="search-form">
+    <label>Location
+      <input type="text" name="location" placeholder="New York, NY" required />
+    </label>
+    <label>Adults
+      <input type="number" name="adults" value="1" min="1" required />
+    </label>
+    <label>Check-in
+      <input type="date" name="check_in" required />
+    </label>
+    <label>Check-out
+      <input type="date" name="check_out" required />
+    </label>
+    <label>Rooms
+      <input type="number" name="rooms" value="1" min="1" required />
+    </label>
+    <button type="submit">Search</button>
+  </form>
+
+  <div id="error" hidden></div>
+  <table id="results" hidden>
+    <thead>
+      <tr><th>Hotel</th><th>Price / night</th><th>Total</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <script>
+    const form = document.getElementById("search-form");
+    const errorEl = document.getElementById("error");
+    const resultsEl = document.getElementById("results");
+    const resultsBody = resultsEl.querySelector("tbody");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      errorEl.hidden = true;
+      resultsEl.hidden = true;
+      resultsBody.innerHTML = "";
+
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.adults = Number(data.adults);
+      data.rooms = Number(data.rooms);
+
+      const response = await fetch("/api/search", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data),
+      });
+      const body = await response.json();
+
+      if (!response.ok) {
+        errorEl.textContent = body.error || "Search failed.";
+        errorEl.hidden = false;
+        return;
+      }
+
+      for (const hotel of body.hotels) {
+        const row = document.createElement("tr");
+        row.innerHTML = `
+          <td>${hotel.name}</td>
+          <td>${hotel.price_per_night != null ? "$" + hotel.price_per_night.toFixed(2) : "-"}</td>
+          <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
+        `;
+        resultsBody.appendChild(row);
+      }
+      resultsEl.hidden = false;
+    });
+  </script>
+</body>
+</html>

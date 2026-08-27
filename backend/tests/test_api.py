@@ -20,7 +20,13 @@ VALID_PAYLOAD = {
 @patch("backend.app.api.search", new_callable=AsyncMock)
 def test_search_success(mock_search):
     mock_search.return_value = [
-        Hotel(name="Test Hotel", price_per_night=100.0, total_price=200.0, currency="USD")
+        Hotel(
+            name="Test Hotel",
+            price_per_night=100.0,
+            total_price=200.0,
+            currency="USD",
+            url="https://www.marriott.com/search/availabilityCalendar.mi?propertyCode=TEST",
+        )
     ]
     response = client.post("/api/search", json=VALID_PAYLOAD)
     assert response.status_code == 200
@@ -31,6 +37,7 @@ def test_search_success(mock_search):
                 "price_per_night": 100.0,
                 "total_price": 200.0,
                 "currency": "USD",
+                "url": "https://www.marriott.com/search/availabilityCalendar.mi?propertyCode=TEST",
             }
         ]
     }
@@ -53,7 +60,13 @@ def test_search_invalid_dates_returns_422():
 @patch("backend.app.api.search_prepay", new_callable=AsyncMock)
 def test_search_prepay_success(mock_search_prepay):
     mock_search_prepay.return_value = [
-        Hotel(name="Prepay Hotel", price_per_night=541.0, total_price=1082.0, currency="USD")
+        Hotel(
+            name="Prepay Hotel",
+            price_per_night=541.0,
+            total_price=1082.0,
+            currency="USD",
+            url="https://www.marriott.com/search/availabilityCalendar.mi?propertyCode=TEST",
+        )
     ]
     response = client.post("/api/search-prepay", json=VALID_PAYLOAD)
     assert response.status_code == 200
@@ -64,6 +77,7 @@ def test_search_prepay_success(mock_search_prepay):
                 "price_per_night": 541.0,
                 "total_price": 1082.0,
                 "currency": "USD",
+                "url": "https://www.marriott.com/search/availabilityCalendar.mi?propertyCode=TEST",
             }
         ]
     }

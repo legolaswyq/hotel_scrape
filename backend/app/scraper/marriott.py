@@ -45,6 +45,13 @@ SEARCH_URL_TEMPLATE = (
     "&showAvailableHotels=true&showFullPrice=true"
 )
 
+RATES_URL_TEMPLATE = (
+    "https://www.marriott.com/search/availabilityCalendar.mi"
+    "?propertyCode={code}&isSearch=true&showFullPrice=true"
+    "&fromDate={from_date}&toDate={to_date}"
+    "&roomCount={rooms}&numAdultsPerRoom={adults}"
+)
+
 RESULTS_TIMEOUT_MS = 30_000
 
 PROPERTY_CARD_SELECTOR = "div.property-card[data-property]"
@@ -90,6 +97,17 @@ def _build_search_url(req: SearchRequest) -> str:
     )
 
 
+def _build_rates_url(req: SearchRequest, code: str) -> str:
+    """URL for a specific hotel's room/rate picker page, given its marshacode."""
+    return RATES_URL_TEMPLATE.format(
+        code=code,
+        from_date=quote_plus(req.check_in.strftime("%m/%d/%Y")),
+        to_date=quote_plus(req.check_out.strftime("%m/%d/%Y")),
+        rooms=req.rooms,
+        adults=req.adults,
+    )
+
+
 def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
     """Return (marshacode, hotelName) for each result card, in listed order."""
     codes: list[tuple[str, str]] = []
@@ -108,7 +126,7 @@ def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
     return codes
 
 
-def _extract_hotels(page_html: str, nights: int) -> list[Hotel]:
+def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[Hotel]:
     hotels: list[Hotel] = []
     for chunk in page_html.split(PROPERTY_CARD_SPLIT)[1:]:
         prop_match = DATA_PROPERTY_RE.search(chunk)
@@ -133,12 +151,16 @@ def _extract_hotels(page_html: str, nights: int) -> list[Hotel]:
 
         total_price = price_per_night * nights if price_per_night is not None else None
 
+        code = data.get("marshacode")
+        url = _build_rates_url(req, code) if code else None
+
         hotels.append(
             Hotel(
                 name=name,
                 price_per_night=price_per_night,
                 total_price=total_price,
                 currency=data.get("currency", "USD"),
+                url=url,
             )
         )
     return hotels
@@ -180,6 +202,6 @@ async def search(req: SearchRequest) -> list[Hotel]:
                 ) from exc
 
             page_html = await page.content()
-            return _extract_hotels(page_html, nights)
+            return _extract_hotels(page_html, req, nights)
         finally:
             await context.close()

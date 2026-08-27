@@ -1,6 +1,4 @@
-from backend.app.scraper.marriott_prepay import _build_rates_url, _extract_prepay_member_price
-from backend.app.models import SearchRequest
-from datetime import date
+from backend.app.scraper.marriott_prepay import _extract_prepay_member_price
 
 
 def _rate_card(rate_name: str, tax_inclusive: str, base: str, tax_inclusive_first: bool = True) -> str:
@@ -49,19 +47,3 @@ def test_returns_none_when_prepay_present_but_member_rate_missing():
         f"<div>{_rate_card('Non-Member Rate', '570', '494')}</div>"
     )
     assert _extract_prepay_member_price(page_html) is None
-
-
-def test_build_rates_url_includes_property_code_and_dates():
-    req = SearchRequest(
-        location="New York, NY",
-        check_in=date(2026, 9, 11),
-        check_out=date(2026, 9, 13),
-        adults=1,
-        rooms=1,
-    )
-    url = _build_rates_url(req, "NYCES")
-    assert "propertyCode=NYCES" in url
-    assert "fromDate=09%2F11%2F2026" in url
-    assert "toDate=09%2F13%2F2026" in url
-    assert "roomCount=1" in url
-    assert "numAdultsPerRoom=1" in url

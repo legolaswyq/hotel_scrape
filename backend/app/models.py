@@ -26,6 +26,7 @@ class Hotel(BaseModel):
     price_per_night: float | None
     total_price: float | None
     currency: str
+    url: str | None = None
 
 
 class SearchResponse(BaseModel):

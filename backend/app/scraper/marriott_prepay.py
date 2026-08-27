@@ -18,7 +18,6 @@ or retrying immediately.
 
 import asyncio
 import random
-from urllib.parse import quote_plus
 
 from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import Page, async_playwright
@@ -30,15 +29,9 @@ from backend.app.scraper.marriott import (
     PROPERTY_CARD_SELECTOR,
     RATE_CARD_RE,
     RESULTS_TIMEOUT_MS,
+    _build_rates_url,
     _build_search_url,
     _extract_hotel_codes,
-)
-
-RATES_URL_TEMPLATE = (
-    "https://www.marriott.com/search/availabilityCalendar.mi"
-    "?propertyCode={code}&isSearch=true&showFullPrice=true"
-    "&fromDate={from_date}&toDate={to_date}"
-    "&roomCount={rooms}&numAdultsPerRoom={adults}"
 )
 
 PREPAY_MARKER = "Prepay Non-refundable"
@@ -50,16 +43,6 @@ VIEW_RATES_RENDER_WAIT_MS = 2_500
 
 DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
-
-
-def _build_rates_url(req: SearchRequest, code: str) -> str:
-    return RATES_URL_TEMPLATE.format(
-        code=code,
-        from_date=quote_plus(req.check_in.strftime("%m/%d/%Y")),
-        to_date=quote_plus(req.check_out.strftime("%m/%d/%Y")),
-        rooms=req.rooms,
-        adults=req.adults,
-    )
 
 
 def _extract_prepay_member_price(page_html: str) -> float | None:
@@ -101,7 +84,13 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
     if price is None:
         return None
 
-    return Hotel(name=name, price_per_night=price, total_price=price * nights, currency="USD")
+    return Hotel(
+        name=name,
+        price_per_night=price,
+        total_price=price * nights,
+        currency="USD",
+        url=url,
+    )
 
 
 async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Hotel]:

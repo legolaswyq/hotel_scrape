@@ -94,8 +94,11 @@
 
       for (const hotel of body.hotels) {
         const row = document.createElement("tr");
+        const nameCell = hotel.url
+          ? `<a href="${hotel.url}" target="_blank" rel="noopener">${hotel.name}</a>`
+          : hotel.name;
         row.innerHTML = `
-          <td>${hotel.name}</td>
+          <td>${nameCell}</td>
           <td>${hotel.price_per_night != null ? "$" + hotel.price_per_night.toFixed(2) : "-"}</td>
           <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
         `;

@@ -52,13 +52,17 @@ PROPERTY_CARD_SPLIT = 'class=" property-card"'
 DATA_PROPERTY_RE = re.compile(r'data-property="([^"]+)"')
 DISPLAYED_PRICE_RE = re.compile(r'aria-label="\s*now\s*([\d,]+)\s*"')
 
-# Matches a rate-plan card's name and its two price spans: the tax-inclusive
-# price (in a `d-none` span, hidden unless "show with taxes and fees" is on)
-# followed by the pre-tax base price. Used by marriott_prepay.py to read a
-# specific rate plan's price after expanding a room's "View Rates" panel.
+# Matches a rate-plan card's name and its two price spans (tax-inclusive and
+# pre-tax base price). Which span carries the `d-none` (hidden) class flips
+# depending on page state/navigation path -- confirmed live, not just a
+# theoretical toggle -- so this captures both numbers by position only and
+# leaves picking the tax-inclusive one (the larger of the two) to the
+# caller, rather than trusting the class. Used by marriott_prepay.py to
+# read a specific rate plan's price after expanding a room's "View Rates".
 RATE_CARD_RE = re.compile(
-    r'rate-name">([^<]+)</span>.*?class="d-none">([\d,]+)</span>'
-    r'<span aria-hidden="false" class="">([\d,]+)</span>',
+    r'rate-name">([^<]+)</span>.*?class="price">'
+    r'<span aria-hidden="false" class="[^"]*">([\d,]+)</span>'
+    r'<span aria-hidden="false" class="[^"]*">([\d,]+)</span>',
     re.S,
 )
 

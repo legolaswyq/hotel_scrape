@@ -44,6 +44,7 @@ RATES_URL_TEMPLATE = (
 PREPAY_MARKER = "Prepay Non-refundable"
 PREPAY_CHUNK_SIZE = 6000
 RATE_LOAD_TIMEOUT_MS = 20_000
+RATE_PAGE_HYDRATION_WAIT_MS = 3_000
 VIEW_RATES_CLICK_TIMEOUT_MS = 10_000
 VIEW_RATES_RENDER_WAIT_MS = 2_500
 
@@ -67,10 +68,10 @@ def _extract_prepay_member_price(page_html: str) -> float | None:
     if idx == -1:
         return None
     chunk = page_html[idx : idx + PREPAY_CHUNK_SIZE]
-    for rate_name, tax_inclusive_price, _base_price in RATE_CARD_RE.findall(chunk):
+    for rate_name, price_a, price_b in RATE_CARD_RE.findall(chunk):
         if rate_name.strip() == "Member Rate":
             try:
-                return float(tax_inclusive_price.replace(",", ""))
+                return max(float(price_a.replace(",", "")), float(price_b.replace(",", "")))
             except ValueError:
                 return None
     return None
@@ -81,6 +82,12 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
     response = await page.goto(url, wait_until="domcontentloaded", timeout=RATE_LOAD_TIMEOUT_MS)
     if response is not None and response.status == 403:
         raise ScraperBlockedError(f"Marriott returned 403 for {url}")
+
+    # The "View Rates" button exists in the DOM right after domcontentloaded
+    # but its click handler isn't wired up until the page's JS framework
+    # finishes hydrating -- clicking immediately is a silent no-op. Confirmed
+    # by reproducing with/without this wait against the live site.
+    await page.wait_for_timeout(RATE_PAGE_HYDRATION_WAIT_MS)
 
     try:
         await page.get_by_role("button", name="View Rates").first.click(
@@ -97,12 +104,14 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
     return Hotel(name=name, price_per_night=price, total_price=price * nights, currency="USD")
 
 
-async def search_prepay(req: SearchRequest) -> list[Hotel]:
+async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Hotel]:
     """Return only hotels (from a Marriott search) that offer a Prepay Non-refundable rate.
 
     Slow by design (see module docstring): one hotel rate page at a time,
     with a randomized delay between each, to avoid the block a fast burst
-    of requests triggered previously.
+    of requests triggered previously. `limit` caps how many of the search
+    result hotels are checked, in listed order -- useful for trying a
+    handful before committing to a full scan.
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
@@ -125,6 +134,8 @@ async def search_prepay(req: SearchRequest) -> list[Hotel]:
             await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
 
             hotel_codes = _extract_hotel_codes(await page.content())
+            if limit is not None:
+                hotel_codes = hotel_codes[:limit]
 
             results: list[Hotel] = []
             for i, (code, name) in enumerate(hotel_codes):

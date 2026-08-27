@@ -59,12 +59,19 @@
       data.adults = Number(data.adults);
       data.rooms = Number(data.rooms);
 
-      const response = await fetch("/api/search", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(data),
-      });
-      const body = await response.json();
+      let response, body;
+      try {
+        response = await fetch("/api/search", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+        });
+        body = await response.json();
+      } catch (err) {
+        errorEl.textContent = "Search failed — check your connection and try again.";
+        errorEl.hidden = false;
+        return;
+      }
 
       if (!response.ok) {
         errorEl.textContent = body.error || "Search failed.";

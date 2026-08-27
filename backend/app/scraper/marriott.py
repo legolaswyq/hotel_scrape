@@ -15,8 +15,14 @@ Each result card is a `div.property-card[data-property='{...}']` element
 where the `data-property` attribute is an HTML-escaped JSON blob:
     {"lat":..., "long":..., "brand":"CY", "marshacode":"NYCES",
      "currency":"USD", "price":"469", "hotelName":"Courtyard by ..."}
-`price` is the per-night rate. Total price is computed from nights * price
-since Marriott's search results page does not surface a separate total.
+`data-property.price` is always the pre-tax base rate and does NOT reflect
+the "show rates with taxes and all fees" toggle (`showFullPrice=true` in
+the URL), even when that toggle is on. The tax-inclusive rate is only in
+the rendered price span within the same card, as `aria-label="  now  541  "`
+on the `.m-price` element. So price is read from that span per-card, not
+from `data-property`; `data-property` is only used for the hotel name
+(and currency). Total price is computed from nights * price since
+Marriott's search results page does not surface a separate total.
 """
 
 import html
@@ -36,12 +42,15 @@ SEARCH_URL_TEMPLATE = (
     "&destinationAddress.city={city}&destinationAddress.stateProvince={state}"
     "&destinationAddress.country={country}"
     "&roomCount={rooms}&numAdultsPerRoom={adults}"
+    "&showAvailableHotels=true&showFullPrice=true"
 )
 
 RESULTS_TIMEOUT_MS = 30_000
 
 PROPERTY_CARD_SELECTOR = "div.property-card[data-property]"
+PROPERTY_CARD_SPLIT = 'class=" property-card"'
 DATA_PROPERTY_RE = re.compile(r'data-property="([^"]+)"')
+DISPLAYED_PRICE_RE = re.compile(r'aria-label="\s*now\s*([\d,]+)\s*"')
 
 _PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile"
 
@@ -69,9 +78,12 @@ def _build_search_url(req: SearchRequest) -> str:
 
 def _extract_hotels(page_html: str, nights: int) -> list[Hotel]:
     hotels: list[Hotel] = []
-    for raw in DATA_PROPERTY_RE.findall(page_html):
+    for chunk in page_html.split(PROPERTY_CARD_SPLIT)[1:]:
+        prop_match = DATA_PROPERTY_RE.search(chunk)
+        if not prop_match:
+            continue
         try:
-            data = json.loads(html.unescape(raw))
+            data = json.loads(html.unescape(prop_match.group(1)))
         except json.JSONDecodeError:
             continue
 
@@ -80,10 +92,10 @@ def _extract_hotels(page_html: str, nights: int) -> list[Hotel]:
             continue
 
         price_per_night: float | None = None
-        raw_price = data.get("price")
-        if raw_price:
+        price_match = DISPLAYED_PRICE_RE.search(chunk)
+        if price_match:
             try:
-                price_per_night = float(raw_price)
+                price_per_night = float(price_match.group(1).replace(",", ""))
             except ValueError:
                 price_per_night = None
 

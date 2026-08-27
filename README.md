@@ -1,14 +1,15 @@
 # hotel_scrape
 
 Local app to search Marriott hotel availability by location, date range, and
-guest count. v1 scrapes Marriott only, via a headless Playwright browser
-(plain HTTP requests are blocked by Marriott's bot protection).
+guest count. v1 scrapes Marriott only, via a patchright-driven Chrome browser
+(plain HTTP requests and stock Playwright are blocked by Marriott's Akamai
+bot protection; patchright patches the CDP leaks that detection keys on).
 
 ## Setup
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium
+patchright install chrome
 ```
 
 ## Run
@@ -27,7 +28,11 @@ pytest backend/tests -v
 
 ## Known limitations
 
-- Marriott may block or CAPTCHA-gate the automated browser session; the app
-  surfaces this as a clear error rather than crashing, per design.
-- Location resolution depends on marriott.com's own destination-autosuggest
-  UI, which may change without notice.
+- A visible Chrome window opens for each search (patchright works headed,
+  not headless, against Marriott's bot protection); it closes automatically
+  when the search completes.
+- Location parsing only supports "City, ST" (US) input for now.
+- Marriott may still block or CAPTCHA-gate the session; the app surfaces
+  this as a clear error rather than crashing, per design.
+- Only price-per-night is available from the results page; total price is
+  computed as price-per-night × nights.

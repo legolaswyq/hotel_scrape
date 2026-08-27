@@ -59,13 +59,17 @@ hotel_scrape/
 - [ ] **Step 1: Create `requirements.txt`**
 
 ```
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
-playwright==1.47.0
-pydantic==2.9.2
-pytest==8.3.3
-httpx==0.27.2
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+playwright==1.62.0
+pydantic==2.13.4
+pytest==9.1.1
+httpx==0.28.1
 ```
+
+(Versions verified installable against the local Python 3.14 interpreter. If
+your environment has an older Python, `pip install -r requirements.txt`
+will still resolve compatible versions via pip's normal resolution.)
 
 - [ ] **Step 2: Install dependencies and Playwright browser**
 

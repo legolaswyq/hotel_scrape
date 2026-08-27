@@ -21,6 +21,13 @@ block has lifted (or from a different network), and update:
   - the guest/room selectors (often behind a "Rooms & Guests" popover control
     rather than plain <select> elements)
   - the results-card selectors and per-card name/price/total selectors
+  - the no-results indicator selector (see NO_RESULTS_SELECTOR below) --
+    Marriott search UIs commonly render a "no properties match your search"
+    or similar message when a search legitimately returns zero hotels; this
+    must be distinguished from a genuine timeout/failure so that a
+    zero-result search returns `hotels: []` (200) rather than being reported
+    as ScraperTimeoutError (502). The selector below is an unverified
+    best-effort guess, like the others in this file.
 using `page.pause()` or a scratch script to inspect the live DOM.
 """
 
@@ -33,6 +40,11 @@ from backend.app.scraper.parsing import parse_price
 SEARCH_URL = "https://www.marriott.com/default.mi"
 RESULTS_TIMEOUT_MS = 30_000
 
+HOTEL_CARD_SELECTOR = "[data-testid='hotel-card']"
+# UNVERIFIED: see module docstring. Best-effort placeholder for whatever
+# element Marriott renders when a search legitimately returns zero results.
+NO_RESULTS_SELECTOR = "[data-testid='no-results']"
+
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -42,19 +54,24 @@ _USER_AGENT = (
 async def search(req: SearchRequest) -> list[Hotel]:
     """Drive a real Chromium session through marriott.com's search UI.
 
+    A legitimate zero-result search (results area loaded, no hotel cards
+    present) returns an empty list rather than raising -- this is a valid
+    outcome, not a failure.
+
     Raises:
         ScraperBlockedError: the site returned a 403 or otherwise blocked the
             session (Akamai bot-protection, CAPTCHA challenge page, etc).
-        ScraperTimeoutError: the search flow did not reach a results page
-            with hotel cards within RESULTS_TIMEOUT_MS.
+        ScraperTimeoutError: the search flow did not reach a results page at
+            all -- neither hotel cards nor the no-results indicator appeared
+            within RESULTS_TIMEOUT_MS.
     """
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=True)
-        page = await browser.new_page(
-            user_agent=_USER_AGENT,
-            viewport={"width": 1366, "height": 900},
-        )
         try:
+            page = await browser.new_page(
+                user_agent=_USER_AGENT,
+                viewport={"width": 1366, "height": 900},
+            )
             response = await page.goto(SEARCH_URL, wait_until="domcontentloaded")
             if response is not None and response.status == 403:
                 raise ScraperBlockedError(f"Marriott returned 403 for {SEARCH_URL}")
@@ -68,9 +85,19 @@ async def search(req: SearchRequest) -> list[Hotel]:
             await page.get_by_label("Rooms").select_option(str(req.rooms))
             await page.get_by_role("button", name="Search").click()
 
-            await page.wait_for_selector("[data-testid='hotel-card']", timeout=RESULTS_TIMEOUT_MS)
+            # Wait for whichever results-area signal appears first: either
+            # hotel cards (results found) or the no-results indicator (a
+            # legitimate zero-result search). Only a genuine timeout -- where
+            # neither signal ever appears -- is treated as ScraperTimeoutError.
+            await page.wait_for_selector(
+                f"{HOTEL_CARD_SELECTOR}, {NO_RESULTS_SELECTOR}",
+                timeout=RESULTS_TIMEOUT_MS,
+            )
 
-            cards = await page.query_selector_all("[data-testid='hotel-card']")
+            cards = await page.query_selector_all(HOTEL_CARD_SELECTOR)
+            if not cards:
+                return []
+
             hotels: list[Hotel] = []
             for card in cards:
                 name_el = await card.query_selector("[data-testid='hotel-name']")

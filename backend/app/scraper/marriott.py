@@ -29,9 +29,17 @@ block has lifted (or from a different network), and update:
     as ScraperTimeoutError (502). The selector below is an unverified
     best-effort guess, like the others in this file.
 using `page.pause()` or a scratch script to inspect the live DOM.
+
+STEALTH NOTE: this module uses playwright-stealth (Stealth().use_async(...))
+plus a launch arg disabling the AutomationControlled blink feature, to reduce
+common headless-browser fingerprints Akamai and similar bot-protection
+vendors check for (navigator.webdriver, missing plugins/fonts, automation
+flags). This narrows the gap versus a real browser but is not a guarantee of
+avoiding detection -- Marriott may still block the session.
 """
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright_stealth import Stealth
 
 from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper.exceptions import ScraperBlockedError, ScraperTimeoutError
@@ -65,8 +73,11 @@ async def search(req: SearchRequest) -> list[Hotel]:
             all -- neither hotel cards nor the no-results indicator appeared
             within RESULTS_TIMEOUT_MS.
     """
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+    async with Stealth().use_async(async_playwright()) as playwright:
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=["--disable-blink-features=AutomationControlled"],
+        )
         try:
             page = await browser.new_page(
                 user_agent=_USER_AGENT,

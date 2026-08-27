@@ -66,7 +66,7 @@ RATE_CARD_RE = re.compile(
     re.S,
 )
 
-_PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile"
+_PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile_2"
 
 
 def _parse_location(location: str) -> tuple[str, str]:

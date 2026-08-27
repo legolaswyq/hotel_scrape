@@ -26,6 +26,29 @@ Open http://localhost:8000/ and search.
 pytest backend/tests -v
 ```
 
+## 安装与运行（中文）
+
+### 安装
+
+```bash
+pip install -r requirements.txt
+patchright install chrome
+```
+
+### 运行
+
+```bash
+uvicorn backend.app.main:app --reload
+```
+
+打开 http://localhost:8000/ 即可搜索。
+
+### 测试
+
+```bash
+pytest backend/tests -v
+```
+
 ## Known limitations
 
 - A visible Chrome window opens for each search (patchright works headed,

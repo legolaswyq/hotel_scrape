@@ -32,6 +32,13 @@
     <label>Rooms
       <input type="number" name="rooms" value="1" min="1" required />
     </label>
+    <label>Limit (prepay only, optional)
+      <input type="number" id="prepay-limit" min="1" placeholder="all" />
+    </label>
+    <label style="flex-direction: row; align-items: center; gap: 0.4rem;">
+      <input type="checkbox" id="prepay-only" style="width: auto;" />
+      Prepay rates only (slower — checks each hotel individually)
+    </label>
     <button type="submit">Search</button>
   </form>
 
@@ -59,9 +66,15 @@
       data.adults = Number(data.adults);
       data.rooms = Number(data.rooms);
 
+      const prepayOnly = document.getElementById("prepay-only").checked;
+      const limitValue = document.getElementById("prepay-limit").value;
+      const url = prepayOnly
+        ? "/api/search-prepay" + (limitValue ? `?limit=${Number(limitValue)}` : "")
+        : "/api/search";
+
       let response, body;
       try {
-        response = await fetch("/api/search", {
+        response = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(data),

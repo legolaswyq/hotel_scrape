@@ -1,6 +1,9 @@
 from fastapi import FastAPI
 
+from backend.app.api import router
+
 app = FastAPI(title="Hotel Scrape")
+app.include_router(router)
 
 
 @app.get("/health")

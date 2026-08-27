@@ -69,37 +69,34 @@ async def search(req: SearchRequest) -> list[Hotel]:
             await page.get_by_role("button", name="Search").click()
 
             await page.wait_for_selector("[data-testid='hotel-card']", timeout=RESULTS_TIMEOUT_MS)
+
+            cards = await page.query_selector_all("[data-testid='hotel-card']")
+            hotels: list[Hotel] = []
+            for card in cards:
+                name_el = await card.query_selector("[data-testid='hotel-name']")
+                price_el = await card.query_selector("[data-testid='price-per-night']")
+                total_el = await card.query_selector("[data-testid='total-price']")
+
+                name = (await name_el.inner_text()).strip() if name_el else None
+                price_text = await price_el.inner_text() if price_el else None
+                total_text = await total_el.inner_text() if total_el else None
+
+                if not name:
+                    continue
+
+                hotels.append(
+                    Hotel(
+                        name=name,
+                        price_per_night=parse_price(price_text),
+                        total_price=parse_price(total_text),
+                        currency="USD",
+                    )
+                )
+
+            return hotels
         except PlaywrightTimeoutError as exc:
-            await browser.close()
             raise ScraperTimeoutError(
                 f"Timed out waiting for Marriott results for '{req.location}'"
             ) from exc
-        except ScraperBlockedError:
+        finally:
             await browser.close()
-            raise
-
-        cards = await page.query_selector_all("[data-testid='hotel-card']")
-        hotels: list[Hotel] = []
-        for card in cards:
-            name_el = await card.query_selector("[data-testid='hotel-name']")
-            price_el = await card.query_selector("[data-testid='price-per-night']")
-            total_el = await card.query_selector("[data-testid='total-price']")
-
-            name = (await name_el.inner_text()).strip() if name_el else None
-            price_text = await price_el.inner_text() if price_el else None
-            total_text = await total_el.inner_text() if total_el else None
-
-            if not name:
-                continue
-
-            hotels.append(
-                Hotel(
-                    name=name,
-                    price_per_night=parse_price(price_text),
-                    total_price=parse_price(total_text),
-                    currency="USD",
-                )
-            )
-
-        await browser.close()
-        return hotels

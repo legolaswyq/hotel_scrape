@@ -1,6 +1,6 @@
 """Local JSON-file persistence for prepay scan progress, keyed by search query.
 
-Lets search_prepay() resume across calls: hotels already checked for a
+Lets check_prepay() resume across calls: hotels already checked for a
 given location/dates/guest count are remembered, so a later call with the
 same query continues from the next unchecked hotel instead of starting
 over and re-checking (and re-risking a block on) hotels already done.

@@ -32,20 +32,20 @@
     <label>Rooms
       <input type="number" name="rooms" value="1" min="1" required />
     </label>
-    <label>New hotels to check (prepay only, optional)
+    <label>Hotels to check for prepay (optional)
       <input type="number" id="prepay-limit" min="1" placeholder="all" />
-    </label>
-    <label style="flex-direction: row; align-items: center; gap: 0.4rem;">
-      <input type="checkbox" id="prepay-only" style="width: auto;" />
-      Prepay rates only (slower — checks each hotel individually; resumes from where it left off for the same search)
     </label>
     <button type="submit">Search</button>
   </form>
+  <p style="font-size: 0.8rem; color: #666;">
+    After listing hotels, each one is checked individually for a prepay
+    rate (slower — resumes from where it left off on a repeat search).
+  </p>
 
   <div id="error" hidden></div>
   <table id="results" hidden>
     <thead>
-      <tr><th>Hotel</th><th>Price / night</th><th>Total</th></tr>
+      <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th>Prepay</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -66,11 +66,8 @@
       data.adults = Number(data.adults);
       data.rooms = Number(data.rooms);
 
-      const prepayOnly = document.getElementById("prepay-only").checked;
       const limitValue = document.getElementById("prepay-limit").value;
-      const url = prepayOnly
-        ? "/api/search-prepay" + (limitValue ? `?limit=${Number(limitValue)}` : "")
-        : "/api/search";
+      const url = "/api/search" + (limitValue ? `?prepay_limit=${Number(limitValue)}` : "");
 
       let response, body;
       try {
@@ -97,10 +94,13 @@
         const nameCell = hotel.url
           ? `<a href="${hotel.url}" target="_blank" rel="noopener">${hotel.name}</a>`
           : hotel.name;
+        const prepayCell =
+          hotel.supports_prepay === true ? "Yes" : hotel.supports_prepay === false ? "No" : "—";
         row.innerHTML = `
           <td>${nameCell}</td>
           <td>${hotel.price_per_night != null ? "$" + hotel.price_per_night.toFixed(2) : "-"}</td>
           <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
+          <td>${prepayCell}</td>
         `;
         resultsBody.appendChild(row);
       }

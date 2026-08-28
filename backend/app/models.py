@@ -27,6 +27,8 @@ class Hotel(BaseModel):
     total_price: float | None
     currency: str
     url: str | None = None
+    code: str | None = None
+    supports_prepay: bool | None = None
 
 
 class SearchResponse(BaseModel):

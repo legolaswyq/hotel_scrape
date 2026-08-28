@@ -1,8 +1,7 @@
 """Local JSON-file cache of full search results for a query, resumable
-across pagination pages -- same idea as hotel_list_store.py, but storing
-full Hotel objects (with price/url) for the plain (non-prepay) search
-path, which has no separate reason to keep only the lighter code/name
-pairs.
+across pagination pages. Stores full Hotel objects (price/url/code) -- the
+listing this feeds is also what prepay checking (marriott_prepay.py) reads
+its hotel list from, so it carries the code field checking keys off.
 
 One JSON file per distinct query lives under DATA_DIR, outside the repo
 (gitignored) -- this is a cache file, not something to version.

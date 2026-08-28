@@ -4,9 +4,9 @@ from datetime import date
 from unittest.mock import AsyncMock
 
 import backend.app.scraper.marriott_prepay as marriott_prepay_module
-from backend.app.models import SearchRequest
-from backend.app.scraper import hotel_list_store, prepay_store
-from backend.app.scraper.marriott_prepay import search_prepay
+from backend.app.models import Hotel, SearchRequest
+from backend.app.scraper import prepay_store
+from backend.app.scraper.marriott_prepay import check_prepay
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -21,7 +21,17 @@ CODE_RE = re.compile(r"propertyCode=(\w+)")
 # One hotel (H4) deliberately has no prepay marker, to check that a
 # not-offered result doesn't get recorded as a "found" hotel.
 PRICES = {"H1": "469", "H2": "531", "H3": "402", "H5": "615", "H6": "388"}
-HOTELS = [("H1", "One"), ("H2", "Two"), ("H3", "Three"), ("H4", "Four"), ("H5", "Five"), ("H6", "Six")]
+HOTELS = [
+    Hotel(name=name, price_per_night=100.0, total_price=200.0, currency="USD", code=code)
+    for code, name in [
+        ("H1", "One"),
+        ("H2", "Two"),
+        ("H3", "Three"),
+        ("H4", "Four"),
+        ("H5", "Five"),
+        ("H6", "Six"),
+    ]
+]
 
 
 def _rate_html(price: str | None) -> str:
@@ -89,31 +99,48 @@ class FakePlaywrightCtx:
 
 
 def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeypatch):
-    monkeypatch.setattr(hotel_list_store, "DATA_DIR", tmp_path / "hotel_list_cache")
     monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
     monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
     monkeypatch.setattr(marriott_prepay_module, "DELAY_MAX_SECONDS", 0.0)
 
-    # Listing already complete -- search_prepay should skip pagination
-    # entirely and go straight to the concurrent check phase.
-    hotel_list_store.save(REQ, HOTELS, pages_fetched=1, complete=True)
-
     fake_ctx = FakePlaywrightCtx()
     monkeypatch.setattr(marriott_prepay_module, "async_playwright", lambda: fake_ctx)
 
-    result = asyncio.run(search_prepay(REQ))
+    hotels = [h.model_copy() for h in HOTELS]
+    result = asyncio.run(check_prepay(REQ, hotels))
 
-    assert {h.name for h in result} == {"One", "Two", "Three", "Five", "Six"}
-    result_by_name = {h.name: h.price_per_night for h in result}
-    name_by_code = dict(HOTELS)
-    for code, price in PRICES.items():
-        assert result_by_name[name_by_code[code]] == float(price)
+    result_by_code = {h.code: h for h in result}
+    for code in PRICES:
+        assert result_by_code[code].supports_prepay is True
+    assert result_by_code["H4"].supports_prepay is False
 
     cached_checked, cached_results = prepay_store.load(REQ)
     assert cached_checked == {"H1", "H2", "H3", "H4", "H5", "H6"}
-    assert {h.name for h in cached_results} == {"One", "Two", "Three", "Five", "Six"}
+    assert {h.code for h in cached_results} == set(PRICES)
 
     # More than one browser session (profile dir) was used concurrently --
     # not a single session churning through all six hotels serially.
     assert len(fake_ctx.chromium.launched_profile_dirs) > 1
     assert len(set(fake_ctx.chromium.launched_profile_dirs)) == len(fake_ctx.chromium.launched_profile_dirs)
+
+
+def test_second_call_with_limit_only_checks_new_hotels(tmp_path, monkeypatch):
+    monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MAX_SECONDS", 0.0)
+
+    fake_ctx = FakePlaywrightCtx()
+    monkeypatch.setattr(marriott_prepay_module, "async_playwright", lambda: fake_ctx)
+
+    hotels = [h.model_copy() for h in HOTELS]
+    first = asyncio.run(check_prepay(REQ, hotels, limit=2))
+    checked_after_first = {h.code for h in first if h.supports_prepay is not None}
+    assert len(checked_after_first) == 2
+    untouched = {h.code for h in first if h.supports_prepay is None}
+    assert len(untouched) == 4
+
+    second = asyncio.run(check_prepay(REQ, hotels))
+    assert all(h.supports_prepay is not None for h in second)
+
+    cached_checked, _ = prepay_store.load(REQ)
+    assert cached_checked == {"H1", "H2", "H3", "H4", "H5", "H6"}

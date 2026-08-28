@@ -279,24 +279,6 @@ async def _wait_for_stable_prices(page) -> str:
     return content
 
 
-def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
-    """Return (marshacode, hotelName) for each result card, in listed order."""
-    codes: list[tuple[str, str]] = []
-    for chunk in page_html.split(PROPERTY_CARD_SPLIT)[1:]:
-        prop_match = DATA_PROPERTY_RE.search(chunk)
-        if not prop_match:
-            continue
-        try:
-            data = json.loads(html.unescape(prop_match.group(1)))
-        except json.JSONDecodeError:
-            continue
-        code = data.get("marshacode")
-        name = data.get("hotelName")
-        if code and name:
-            codes.append((code, name))
-    return codes
-
-
 def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[tuple[str | None, Hotel]]:
     """Return (marshacode, Hotel) per result card -- the code is exposed so
     callers can dedupe across multiple pages of results."""
@@ -336,6 +318,7 @@ def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[tup
                     total_price=total_price,
                     currency=data.get("currency", "USD"),
                     url=url,
+                    code=code,
                 ),
             )
         )
@@ -419,42 +402,6 @@ async def _walk_result_pages(page, req: SearchRequest, skip_pages: int = 0):
             return
 
 
-async def list_all_hotel_codes(
-    page, req: SearchRequest, on_progress=None, skip_pages: int = 0
-) -> list[tuple[str, str]]:
-    """Walk every results page (after skipping `skip_pages` already-known
-    ones), returning (marshacode, hotelName) for every hotel found on the
-    pages actually walked, in listed order, deduplicated.
-
-    If `on_progress` is given, it's called with the accumulated list after
-    each page (not just at the end) -- so a caller that persists it can
-    recover whatever was found so far even if a later page raises (e.g. a
-    block partway through a long pagination walk).
-
-    Raises:
-        ScraperBlockedError: the site returned a 403 or an Akamai block page.
-        ScraperTimeoutError: the search flow did not reach a results page.
-    """
-    seen: dict[str, str] = {}
-    order: list[str] = []
-
-    async for page_html in _walk_result_pages(page, req, skip_pages=skip_pages):
-        added = False
-        for code, name in _extract_hotel_codes(page_html):
-            if code not in seen:
-                seen[code] = name
-                order.append(code)
-                added = True
-        if on_progress is not None:
-            on_progress([(code, seen[code]) for code in order])
-        if not added:
-            # Safety valve: a page that added nothing new would otherwise
-            # keep the generator clicking through pages forever.
-            break
-
-    return [(code, seen[code]) for code in order]
-
-
 async def list_all_hotels(
     page, req: SearchRequest, on_progress=None, skip_pages: int = 0
 ) -> list[Hotel]:
@@ -464,7 +411,9 @@ async def list_all_hotels(
     undeduped).
 
     If `on_progress` is given, it's called with the accumulated list after
-    each page (not just at the end) -- see list_all_hotel_codes for why.
+    each page (not just at the end) -- so a caller that persists it can
+    recover whatever was found so far even if a later page raises (e.g. a
+    block partway through a long pagination walk).
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.

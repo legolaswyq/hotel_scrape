@@ -8,7 +8,7 @@ from patchright.async_api import TimeoutError as PatchrightTimeoutError
 
 from backend.app.models import SearchRequest
 from backend.app.scraper.exceptions import ScraperBlockedError
-from backend.app.scraper.marriott import list_all_hotel_codes, list_all_hotels
+from backend.app.scraper.marriott import list_all_hotels
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -77,9 +77,9 @@ def test_walks_all_pages_and_dedupes():
     ]
     page = FakePage(pages_content)
 
-    result = asyncio.run(list_all_hotel_codes(page, REQ))
+    result = asyncio.run(list_all_hotels(page, REQ))
 
-    assert result == [
+    assert [(h.code, h.name) for h in result] == [
         ("H1", "Hotel One"),
         ("H2", "Hotel Two"),
         ("H3", "Hotel Three"),
@@ -92,12 +92,12 @@ def test_stops_when_next_link_absent():
     page = FakePage(pages_content)
     page.locator = lambda _selector: FakeLocator(exists=False, disabled=False)
 
-    result = asyncio.run(list_all_hotel_codes(page, REQ))
+    result = asyncio.run(list_all_hotels(page, REQ))
 
-    assert result == [("H1", "Hotel One")]
+    assert [(h.code, h.name) for h in result] == [("H1", "Hotel One")]
 
 
-def test_list_all_hotel_codes_reports_progress_after_each_page():
+def test_list_all_hotels_reports_progress_after_each_page():
     pages_content = [
         _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
         _property_card("H3", "Hotel Three"),
@@ -105,9 +105,9 @@ def test_list_all_hotel_codes_reports_progress_after_each_page():
     page = FakePage(pages_content)
     snapshots = []
 
-    asyncio.run(list_all_hotel_codes(page, REQ, on_progress=snapshots.append))
+    asyncio.run(list_all_hotels(page, REQ, on_progress=lambda hotels: snapshots.append(list(hotels))))
 
-    assert snapshots == [
+    assert [[(h.code, h.name) for h in snap] for snap in snapshots] == [
         [("H1", "Hotel One"), ("H2", "Hotel Two")],
         [("H1", "Hotel One"), ("H2", "Hotel Two"), ("H3", "Hotel Three")],
     ]
@@ -146,7 +146,7 @@ def test_block_mid_pagination_raises_instead_of_silently_truncating():
     page.title = AsyncMock(return_value="Access Denied")
 
     with pytest.raises(ScraperBlockedError):
-        asyncio.run(list_all_hotel_codes(page, REQ))
+        asyncio.run(list_all_hotels(page, REQ))
 
 
 def test_closing_browser_on_page_two_keeps_pages_one_and_two_via_on_progress():
@@ -185,11 +185,11 @@ def test_closing_browser_on_page_two_keeps_pages_one_and_two_via_on_progress():
 
     snapshots = []
     with pytest.raises(PatchrightError):
-        asyncio.run(list_all_hotel_codes(page, REQ, on_progress=snapshots.append))
+        asyncio.run(list_all_hotels(page, REQ, on_progress=lambda hotels: snapshots.append(list(hotels))))
 
     # Page 1 and page 2's hotels were captured via on_progress before the
     # close interrupted the click to page 3.
-    assert snapshots[-1] == [
+    assert [(h.code, h.name) for h in snapshots[-1]] == [
         ("H1", "Hotel One"),
         ("H2", "Hotel Two"),
         ("H3", "Hotel Three"),

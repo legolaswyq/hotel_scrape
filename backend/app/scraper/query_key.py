@@ -1,6 +1,6 @@
 """Stable cache key for a search query (location/dates/guest count).
 
-Shared by hotel_list_store.py and prepay_store.py so both cache layers
+Shared by search_result_store.py and prepay_store.py so both cache layers
 agree on what counts as "the same query".
 """
 

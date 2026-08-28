@@ -66,9 +66,23 @@
 
       <div id="error" hidden></div>
       <button id="check-more" type="button" hidden style="width: 100%; padding: 0.6rem; font-size: 1rem; cursor: pointer; margin-top: 1.5rem;"></button>
+
+      <div id="rmb-controls" hidden style="display: flex; align-items: flex-end; gap: 0.5rem; margin-top: 1.5rem;">
+        <label style="display: flex; flex-direction: column; font-size: 0.85rem; flex: 1;">
+          Convert to RMB (USD → CNY rate)
+          <input type="number" id="rmb-rate" min="0" step="0.0001" placeholder="e.g. 7.25" />
+        </label>
+        <button id="rmb-calculate" type="button" style="padding: 0.4rem 0.75rem; font-size: 1rem; cursor: pointer;">Calculate</button>
+      </div>
+
       <table id="results" hidden>
         <thead>
-          <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th id="prepay-header" class="sortable">Prepay ▾</th></tr>
+          <tr>
+            <th>Hotel</th><th>Price / night</th><th>Total</th>
+            <th id="prepay-header" class="sortable">Prepay ▾</th>
+            <th id="rmb-price-header" hidden>Price / night (¥)</th>
+            <th id="rmb-total-header" hidden>Total (¥)</th>
+          </tr>
         </thead>
         <tbody></tbody>
       </table>
@@ -89,10 +103,16 @@
     const checkMoreBtn = document.getElementById("check-more");
     const historyEl = document.getElementById("history");
     const historyList = historyEl.querySelector("ul");
+    const rmbControls = document.getElementById("rmb-controls");
+    const rmbRateInput = document.getElementById("rmb-rate");
+    const rmbCalculateBtn = document.getElementById("rmb-calculate");
+    const rmbPriceHeader = document.getElementById("rmb-price-header");
+    const rmbTotalHeader = document.getElementById("rmb-total-header");
 
     let currentHotels = [];
     let prepaySortDescending = true;
     let lastSearchData = null;
+    let rmbRate = null;
 
     function prepayRank(hotel) {
       // true (supports prepay) ranks first, then false, then not-yet-checked.
@@ -116,9 +136,31 @@
           <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
           <td>${prepayCell}</td>
         `;
+        if (rmbRate != null) {
+          const rmbPrice = hotel.price_per_night != null ? "¥" + (hotel.price_per_night * rmbRate).toFixed(2) : "-";
+          const rmbTotal = hotel.total_price != null ? "¥" + (hotel.total_price * rmbRate).toFixed(2) : "-";
+          row.innerHTML += `<td>${rmbPrice}</td><td>${rmbTotal}</td>`;
+        }
         resultsBody.appendChild(row);
       }
     }
+
+    rmbCalculateBtn.addEventListener("click", () => {
+      const value = Number(rmbRateInput.value);
+      if (!value || value <= 0) {
+        rmbRateInput.focus();
+        return;
+      }
+      rmbRate = value;
+      rmbPriceHeader.hidden = false;
+      rmbTotalHeader.hidden = false;
+      renderRows(
+        [...currentHotels].sort((a, b) => {
+          const diff = prepayRank(a) - prepayRank(b);
+          return prepaySortDescending ? diff : -diff;
+        })
+      );
+    });
 
     prepayHeader.addEventListener("click", () => {
       prepaySortDescending = !prepaySortDescending;
@@ -156,6 +198,7 @@
       prepayHeader.textContent = "Prepay ▾";
       renderRows([...currentHotels].sort((a, b) => prepayRank(a) - prepayRank(b)));
       resultsEl.hidden = false;
+      rmbControls.hidden = false;
       updateCheckMoreButton();
     }
 

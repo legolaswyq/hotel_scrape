@@ -75,6 +75,14 @@
         <button id="rmb-calculate" type="button" style="padding: 0.4rem 0.75rem; font-size: 1rem; cursor: pointer;">Calculate</button>
       </div>
 
+      <div id="discount-controls" hidden style="display: flex; align-items: flex-end; gap: 0.5rem; margin-top: 0.75rem;">
+        <label style="display: flex; flex-direction: column; font-size: 0.85rem; flex: 1;">
+          Apply discount (% of listed price)
+          <input type="number" id="discount-rate" min="0" max="100" step="0.1" value="70" />
+        </label>
+        <button id="discount-apply" type="button" style="padding: 0.4rem 0.75rem; font-size: 1rem; cursor: pointer;">Apply Discount</button>
+      </div>
+
       <table id="results" hidden>
         <thead>
           <tr>
@@ -82,6 +90,8 @@
             <th id="prepay-header" class="sortable">Prepay ▾</th>
             <th id="rmb-price-header" hidden>Price / night (¥)</th>
             <th id="rmb-total-header" hidden>Total (¥)</th>
+            <th id="discount-price-header" hidden>Price / night (Disc.)</th>
+            <th id="discount-total-header" hidden>Total (Disc.)</th>
           </tr>
         </thead>
         <tbody></tbody>
@@ -108,11 +118,17 @@
     const rmbCalculateBtn = document.getElementById("rmb-calculate");
     const rmbPriceHeader = document.getElementById("rmb-price-header");
     const rmbTotalHeader = document.getElementById("rmb-total-header");
+    const discountControls = document.getElementById("discount-controls");
+    const discountRateInput = document.getElementById("discount-rate");
+    const discountApplyBtn = document.getElementById("discount-apply");
+    const discountPriceHeader = document.getElementById("discount-price-header");
+    const discountTotalHeader = document.getElementById("discount-total-header");
 
     let currentHotels = [];
     let prepaySortDescending = true;
     let lastSearchData = null;
     let rmbRate = null;
+    let discountRate = null;
 
     function prepayRank(hotel) {
       // true (supports prepay) ranks first, then false, then not-yet-checked.
@@ -141,8 +157,23 @@
           const rmbTotal = hotel.total_price != null ? "¥" + (hotel.total_price * rmbRate).toFixed(2) : "-";
           row.innerHTML += `<td>${rmbPrice}</td><td>${rmbTotal}</td>`;
         }
+        if (discountRate != null) {
+          const factor = discountRate / 100;
+          const discPrice = hotel.price_per_night != null ? "$" + (hotel.price_per_night * factor).toFixed(2) : "-";
+          const discTotal = hotel.total_price != null ? "$" + (hotel.total_price * factor).toFixed(2) : "-";
+          row.innerHTML += `<td>${discPrice}</td><td>${discTotal}</td>`;
+        }
         resultsBody.appendChild(row);
       }
+    }
+
+    function rerenderSorted() {
+      renderRows(
+        [...currentHotels].sort((a, b) => {
+          const diff = prepayRank(a) - prepayRank(b);
+          return prepaySortDescending ? diff : -diff;
+        })
+      );
     }
 
     rmbCalculateBtn.addEventListener("click", () => {
@@ -154,22 +185,25 @@
       rmbRate = value;
       rmbPriceHeader.hidden = false;
       rmbTotalHeader.hidden = false;
-      renderRows(
-        [...currentHotels].sort((a, b) => {
-          const diff = prepayRank(a) - prepayRank(b);
-          return prepaySortDescending ? diff : -diff;
-        })
-      );
+      rerenderSorted();
+    });
+
+    discountApplyBtn.addEventListener("click", () => {
+      const value = Number(discountRateInput.value);
+      if (!value || value <= 0 || value > 100) {
+        discountRateInput.focus();
+        return;
+      }
+      discountRate = value;
+      discountPriceHeader.hidden = false;
+      discountTotalHeader.hidden = false;
+      rerenderSorted();
     });
 
     prepayHeader.addEventListener("click", () => {
       prepaySortDescending = !prepaySortDescending;
       prepayHeader.textContent = prepaySortDescending ? "Prepay ▾" : "Prepay ▴";
-      const sorted = [...currentHotels].sort((a, b) => {
-        const diff = prepayRank(a) - prepayRank(b);
-        return prepaySortDescending ? diff : -diff;
-      });
-      renderRows(sorted);
+      rerenderSorted();
     });
 
     function updateCheckMoreButton() {
@@ -199,6 +233,7 @@
       renderRows([...currentHotels].sort((a, b) => prepayRank(a) - prepayRank(b)));
       resultsEl.hidden = false;
       rmbControls.hidden = false;
+      discountControls.hidden = false;
       updateCheckMoreButton();
     }
 

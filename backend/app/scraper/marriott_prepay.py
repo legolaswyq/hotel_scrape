@@ -1,10 +1,11 @@
 """Prepay-rate checker for hotels already found by marriott.search().
 
-For each given hotel, opens that hotel's rate page and checks whether its
-first room type offers a "Prepay Non-refundable" rate plan, capturing that
-plan's tax-inclusive Member Rate price. Annotates each hotel's
-`supports_prepay` in place rather than filtering the list -- the caller
-decides what to do with hotels that don't support it.
+For each given hotel, opens that hotel's rate page and checks whether any
+room type offers a "Prepay Non-refundable" rate plan, capturing that plan's
+tax-inclusive Member Rate price and which room type it's for. Annotates
+each hotel's `supports_prepay` (and `room_type`) in place rather than
+filtering the list -- the caller decides what to do with hotels that don't
+support it.
 
 THROTTLING (read before changing timing here): a back-to-back scan of ~40
 hotels at roughly 3s apart triggered an Akamai block (403 "Access Denied")
@@ -19,6 +20,7 @@ rather than adding more workers.
 
 import asyncio
 import random
+import re
 
 from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import Page, async_playwright
@@ -30,6 +32,14 @@ from backend.app.scraper.marriott import RATE_CARD_RE, SessionRotator, _build_ra
 
 PREPAY_MARKER = "Prepay Non-refundable"
 PREPAY_CHUNK_SIZE = 6000
+
+# Each room type's rate cards (including a Prepay Non-refundable one, if it
+# has one) sit under a single `<h3 class="standard room-name">` heading for
+# that room -- confirmed live 2026-08-29 (e.g. "Guest room, 1 King, Low
+# floor"). There's no closing marker tying a rate card to "its" room-name
+# element, so the room type for a given match position is whichever
+# room-name heading is the closest one *before* it on the page.
+ROOM_NAME_RE = re.compile(r'<h3 class="standard room-name">([^<]+)</h3>')
 RATE_LOAD_TIMEOUT_MS = 20_000
 RATE_PAGE_HYDRATION_WAIT_MS = 3_000
 VIEW_RATES_CLICK_TIMEOUT_MS = 10_000
@@ -56,8 +66,19 @@ PROFILES_PER_WORKER = 5
 DEFAULT_PREPAY_LIMIT = 10
 
 
-def _extract_prepay_member_price(page_html: str) -> float | None:
-    """Tax-inclusive Member Rate price for the Prepay Non-refundable plan, if present."""
+def _room_type_before(page_html: str, idx: int) -> str | None:
+    """The room-name heading immediately preceding position `idx` -- see
+    ROOM_NAME_RE for why "immediately preceding" is how a rate card's room
+    type is determined."""
+    room_type = None
+    for match in ROOM_NAME_RE.finditer(page_html, endpos=idx):
+        room_type = match.group(1)
+    return room_type
+
+
+def _extract_prepay_offer(page_html: str) -> tuple[float, str | None] | None:
+    """Tax-inclusive Member Rate price (and room type) for the Prepay
+    Non-refundable plan, if present."""
     idx = page_html.find(PREPAY_MARKER)
     if idx == -1:
         return None
@@ -65,9 +86,10 @@ def _extract_prepay_member_price(page_html: str) -> float | None:
     for rate_name, price_a, price_b in RATE_CARD_RE.findall(chunk):
         if rate_name.strip() == "Member Rate":
             try:
-                return max(float(price_a.replace(",", "")), float(price_b.replace(",", "")))
+                price = max(float(price_a.replace(",", "")), float(price_b.replace(",", "")))
             except ValueError:
                 return None
+            return price, _room_type_before(page_html, idx)
     return None
 
 
@@ -98,9 +120,10 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
         return None
 
     await page.wait_for_timeout(VIEW_RATES_RENDER_WAIT_MS)
-    price = _extract_prepay_member_price(await page.content())
-    if price is None:
+    offer = _extract_prepay_offer(await page.content())
+    if offer is None:
         return None
+    price, room_type = offer
 
     return Hotel(
         name=name,
@@ -110,6 +133,7 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
         url=url,
         code=code,
         supports_prepay=True,
+        room_type=room_type,
     )
 
 

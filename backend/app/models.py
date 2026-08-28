@@ -29,6 +29,7 @@ class Hotel(BaseModel):
     url: str | None = None
     code: str | None = None
     supports_prepay: bool | None = None
+    room_type: str | None = None
 
 
 class SearchResponse(BaseModel):

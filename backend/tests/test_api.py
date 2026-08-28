@@ -56,6 +56,7 @@ def test_search_success(mock_search, mock_check_prepay):
                 "url": "https://www.marriott.com/search/availabilityCalendar.mi?propertyCode=TEST",
                 "code": "TEST",
                 "supports_prepay": True,
+                "room_type": None,
             }
         ]
     }

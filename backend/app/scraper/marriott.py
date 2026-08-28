@@ -75,6 +75,15 @@ RATE_CARD_RE = re.compile(
 
 _PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile_2"
 
+# Search results are paginated (40 hotels/page). Pagination is client-side
+# (an `<a href="#">` with a click handler, not a real navigation) --
+# confirmed live on 2026-08-28. The "NextPage" link gains a `disabled`
+# class on the last page (same pattern as "PrevPage" on page 1).
+NEXT_PAGE_SELECTOR = 'a[aria-label="NextPage"]'
+PAGE_HYDRATION_WAIT_MS = 3_000
+PAGINATION_CLICK_WAIT_MS = 2_500
+MAX_RESULT_PAGES = 20
+
 
 def _parse_location(location: str) -> tuple[str, str]:
     """Split 'City, ST' into (city, state). Only US 'City, ST' input is supported."""
@@ -164,6 +173,65 @@ def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[Hot
             )
         )
     return hotels
+
+
+async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]]:
+    """Navigate to the search results and walk every pagination page, returning
+    (marshacode, hotelName) for every hotel found, in listed order, deduplicated.
+
+    Raises:
+        ScraperBlockedError: the site returned a 403 or an Akamai block page.
+        ScraperTimeoutError: the search flow did not reach a results page.
+    """
+    url = _build_search_url(req)
+    response = await page.goto(url, wait_until="domcontentloaded")
+    if response is not None and response.status == 403:
+        raise ScraperBlockedError(f"Marriott returned 403 for {url}")
+
+    try:
+        await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+    except PatchrightTimeoutError as exc:
+        title = await page.title()
+        if "access denied" in title.lower():
+            raise ScraperBlockedError(f"Marriott blocked the request for {url}") from exc
+        raise ScraperTimeoutError(
+            f"Timed out waiting for Marriott results for '{req.location}'"
+        ) from exc
+
+    # Same hydration issue as the rate page's "View Rates" button: the
+    # pagination link exists in the DOM before its click handler is wired up.
+    await page.wait_for_timeout(PAGE_HYDRATION_WAIT_MS)
+
+    seen: dict[str, str] = {}
+    order: list[str] = []
+
+    for _ in range(MAX_RESULT_PAGES):
+        added = False
+        for code, name in _extract_hotel_codes(await page.content()):
+            if code not in seen:
+                seen[code] = name
+                order.append(code)
+                added = True
+
+        next_link = page.locator(NEXT_PAGE_SELECTOR).first
+        if await next_link.count() == 0:
+            break
+        classes = await next_link.get_attribute("class") or ""
+        if "disabled" in classes:
+            break
+        if not added:
+            # Safety valve: a page that added nothing new but still has an
+            # enabled Next link would otherwise loop forever.
+            break
+
+        await next_link.click()
+        # Clicking briefly clears the results area entirely before the next
+        # page's cards render -- confirmed live: a fixed wait alone can land
+        # in that empty window. Wait for cards to reappear, then settle.
+        await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+        await page.wait_for_timeout(PAGINATION_CLICK_WAIT_MS)
+
+    return [(code, seen[code]) for code in order]
 
 
 async def search(req: SearchRequest) -> list[Hotel]:

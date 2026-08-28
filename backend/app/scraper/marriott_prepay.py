@@ -23,16 +23,13 @@ from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import Page, async_playwright
 
 from backend.app.models import Hotel, SearchRequest
-from backend.app.scraper import prepay_store
+from backend.app.scraper import hotel_list_store, prepay_store
 from backend.app.scraper.exceptions import ScraperBlockedError
 from backend.app.scraper.marriott import (
     _PROFILE_DIR,
-    PROPERTY_CARD_SELECTOR,
     RATE_CARD_RE,
-    RESULTS_TIMEOUT_MS,
     _build_rates_url,
-    _build_search_url,
-    _extract_hotel_codes,
+    list_all_hotel_codes,
 )
 
 PREPAY_MARKER = "Prepay Non-refundable"
@@ -101,23 +98,29 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     with a randomized delay between each, to avoid the block a fast burst
     of requests triggered previously.
 
-    Progress persists to a local JSON file (prepay_store.py) keyed by
-    location/dates/guest count: hotels already checked in a prior call
-    with the same query are skipped, and `limit` caps how many *new*
-    (not-yet-checked) hotels this call checks -- so calling this
-    repeatedly with the same query and a small limit continues the scan
-    from where the last call left off, rather than re-checking from the
-    start. Pass limit=None to check all remaining unchecked hotels in one
-    call. The returned list is the full accumulated result set across all
-    calls for this query, not just this call's batch.
+    The full hotel list for this query is fetched once (walking every
+    results page, see marriott.list_all_hotel_codes) and cached in
+    hotel_list_store.py; later calls for the same query reuse the cached
+    list instead of re-paginating.
+
+    Which hotels have been checked and their results persist to a local
+    JSON file (prepay_store.py) keyed by location/dates/guest count:
+    hotels already checked in a prior call with the same query are
+    skipped, and `limit` caps how many *new* (not-yet-checked) hotels this
+    call checks -- so calling this repeatedly with the same query and a
+    small limit continues the scan from where the last call left off,
+    rather than re-checking from the start. Pass limit=None to check all
+    remaining unchecked hotels in one call. The returned list is the full
+    accumulated result set across all calls for this query, not just this
+    call's batch.
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
     """
     nights = (req.check_out - req.check_in).days
-    search_url = _build_search_url(req)
 
     checked_codes, results = prepay_store.load(req)
+    hotel_codes = hotel_list_store.load(req)
 
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
@@ -128,12 +131,11 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
         )
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            response = await page.goto(search_url, wait_until="domcontentloaded")
-            if response is not None and response.status == 403:
-                raise ScraperBlockedError(f"Marriott returned 403 for {search_url}")
-            await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
 
-            hotel_codes = _extract_hotel_codes(await page.content())
+            if hotel_codes is None:
+                hotel_codes = await list_all_hotel_codes(page, req)
+                hotel_list_store.save(req, hotel_codes)
+
             remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
             batch = remaining[:limit] if limit is not None else remaining
 

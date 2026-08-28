@@ -9,22 +9,17 @@ One JSON file per distinct query lives under DATA_DIR, outside the repo
 (gitignored) -- this is a cache/progress file, not something to version.
 """
 
-import hashlib
 import json
 from pathlib import Path
 
 from backend.app.models import Hotel, SearchRequest
+from backend.app.scraper import query_key
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "prepay_cache"
 
 
-def _key(req: SearchRequest) -> str:
-    raw = f"{req.location.strip().lower()}|{req.check_in}|{req.check_out}|{req.adults}|{req.rooms}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
-
-
 def _path(req: SearchRequest) -> Path:
-    return DATA_DIR / f"{_key(req)}.json"
+    return DATA_DIR / f"{query_key.key(req)}.json"
 
 
 def load(req: SearchRequest) -> tuple[set[str], list[Hotel]]:

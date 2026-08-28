@@ -158,9 +158,15 @@
           row.innerHTML += `<td>${rmbPrice}</td><td>${rmbTotal}</td>`;
         }
         if (discountRate != null) {
+          // Discount applies on top of the RMB conversion when one's set
+          // (discounted price in RMB, not just discounted USD).
           const factor = discountRate / 100;
-          const discPrice = hotel.price_per_night != null ? "$" + (hotel.price_per_night * factor).toFixed(2) : "-";
-          const discTotal = hotel.total_price != null ? "$" + (hotel.total_price * factor).toFixed(2) : "-";
+          const rate = rmbRate != null ? rmbRate : 1;
+          const symbol = rmbRate != null ? "¥" : "$";
+          const discPrice =
+            hotel.price_per_night != null ? symbol + (hotel.price_per_night * factor * rate).toFixed(2) : "-";
+          const discTotal =
+            hotel.total_price != null ? symbol + (hotel.total_price * factor * rate).toFixed(2) : "-";
           row.innerHTML += `<td>${discPrice}</td><td>${discTotal}</td>`;
         }
         resultsBody.appendChild(row);

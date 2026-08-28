@@ -3,6 +3,7 @@ from datetime import date
 from unittest.mock import AsyncMock
 
 import pytest
+from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PatchrightTimeoutError
 
 from backend.app.models import SearchRequest
@@ -146,3 +147,50 @@ def test_block_mid_pagination_raises_instead_of_silently_truncating():
 
     with pytest.raises(ScraperBlockedError):
         asyncio.run(list_all_hotel_codes(page, REQ))
+
+
+def test_closing_browser_on_page_two_keeps_pages_one_and_two_via_on_progress():
+    """Regression for: closing the browser window while on page 2 must not
+    lose page 1's (or page 2's own, since it already finished loading)
+    results -- only the not-yet-fetched page 3 onward is lost. Simulates
+    the close as a raw patchright Error (what a manually closed window
+    raises) hitting the click that would advance to page 3."""
+    pages_content = [
+        _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
+        _property_card("H3", "Hotel Three"),
+        _property_card("H4", "Hotel Four"),  # never reached -- browser closes first
+    ]
+    page = FakePage(pages_content)
+
+    real_click = None
+
+    def locator_that_closes_on_third_click(_selector):
+        nonlocal real_click
+        is_last_page = page.state["page"] == len(pages_content) - 1
+
+        def advance():
+            page.state["page"] += 1
+
+        locator = FakeLocator(exists=True, disabled=is_last_page, on_click=advance)
+        if page.state["page"] == 1:
+            # We're on page 2 already; the click to advance to page 3 is
+            # where the manually-closed browser raises.
+            async def closed_click():
+                raise PatchrightError("Target page, context or browser has been closed")
+
+            locator.click = closed_click
+        return locator
+
+    page.locator = locator_that_closes_on_third_click
+
+    snapshots = []
+    with pytest.raises(PatchrightError):
+        asyncio.run(list_all_hotel_codes(page, REQ, on_progress=snapshots.append))
+
+    # Page 1 and page 2's hotels were captured via on_progress before the
+    # close interrupted the click to page 3.
+    assert snapshots[-1] == [
+        ("H1", "Hotel One"),
+        ("H2", "Hotel Two"),
+        ("H3", "Hotel Three"),
+    ]

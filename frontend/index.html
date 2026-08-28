@@ -11,6 +11,8 @@
     button { grid-column: span 2; padding: 0.6rem; font-size: 1rem; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
     th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ddd; }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { background: #f5f5f5; }
     #error { color: #b00020; margin-top: 1rem; }
   </style>
 </head>
@@ -45,7 +47,7 @@
   <div id="error" hidden></div>
   <table id="results" hidden>
     <thead>
-      <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th>Prepay</th></tr>
+      <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th id="prepay-header" class="sortable">Prepay ▾</th></tr>
     </thead>
     <tbody></tbody>
   </table>
@@ -55,6 +57,46 @@
     const errorEl = document.getElementById("error");
     const resultsEl = document.getElementById("results");
     const resultsBody = resultsEl.querySelector("tbody");
+    const prepayHeader = document.getElementById("prepay-header");
+
+    let currentHotels = [];
+    let prepaySortDescending = true;
+
+    function prepayRank(hotel) {
+      // true (supports prepay) ranks first, then false, then not-yet-checked.
+      if (hotel.supports_prepay === true) return 0;
+      if (hotel.supports_prepay === false) return 1;
+      return 2;
+    }
+
+    function renderRows(hotels) {
+      resultsBody.innerHTML = "";
+      for (const hotel of hotels) {
+        const row = document.createElement("tr");
+        const nameCell = hotel.url
+          ? `<a href="${hotel.url}" target="_blank" rel="noopener">${hotel.name}</a>`
+          : hotel.name;
+        const prepayCell =
+          hotel.supports_prepay === true ? "Yes" : hotel.supports_prepay === false ? "No" : "—";
+        row.innerHTML = `
+          <td>${nameCell}</td>
+          <td>${hotel.price_per_night != null ? "$" + hotel.price_per_night.toFixed(2) : "-"}</td>
+          <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
+          <td>${prepayCell}</td>
+        `;
+        resultsBody.appendChild(row);
+      }
+    }
+
+    prepayHeader.addEventListener("click", () => {
+      prepaySortDescending = !prepaySortDescending;
+      prepayHeader.textContent = prepaySortDescending ? "Prepay ▾" : "Prepay ▴";
+      const sorted = [...currentHotels].sort((a, b) => {
+        const diff = prepayRank(a) - prepayRank(b);
+        return prepaySortDescending ? diff : -diff;
+      });
+      renderRows(sorted);
+    });
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -89,21 +131,10 @@
         return;
       }
 
-      for (const hotel of body.hotels) {
-        const row = document.createElement("tr");
-        const nameCell = hotel.url
-          ? `<a href="${hotel.url}" target="_blank" rel="noopener">${hotel.name}</a>`
-          : hotel.name;
-        const prepayCell =
-          hotel.supports_prepay === true ? "Yes" : hotel.supports_prepay === false ? "No" : "—";
-        row.innerHTML = `
-          <td>${nameCell}</td>
-          <td>${hotel.price_per_night != null ? "$" + hotel.price_per_night.toFixed(2) : "-"}</td>
-          <td>${hotel.total_price != null ? "$" + hotel.total_price.toFixed(2) : "-"}</td>
-          <td>${prepayCell}</td>
-        `;
-        resultsBody.appendChild(row);
-      }
+      currentHotels = body.hotels;
+      prepaySortDescending = true;
+      prepayHeader.textContent = "Prepay ▾";
+      renderRows([...currentHotels].sort((a, b) => prepayRank(a) - prepayRank(b)));
       resultsEl.hidden = false;
     });
   </script>

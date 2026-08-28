@@ -4,10 +4,9 @@ from unittest.mock import AsyncMock
 
 from patchright.async_api import Error as PatchrightError
 
-import backend.app.scraper.marriott_prepay as marriott_prepay_module
+import backend.app.scraper.marriott as marriott_module
 from backend.app.models import SearchRequest
-from backend.app.scraper import hotel_list_store, prepay_store
-from backend.app.scraper.marriott_prepay import search_prepay
+from backend.app.scraper.marriott import search
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -18,9 +17,15 @@ REQ = SearchRequest(
 )
 
 
-def _property_card(code: str, name: str) -> str:
-    data_property = f'{{&quot;hotelName&quot;:&quot;{name}&quot;,&quot;marshacode&quot;:&quot;{code}&quot;}}'
-    return f'class=" property-card" data-property="{data_property}">'
+def _property_card(code: str, name: str, price: str = "469") -> str:
+    data_property = (
+        f'{{&quot;currency&quot;:&quot;USD&quot;,&quot;price&quot;:&quot;{price}&quot;,'
+        f'&quot;hotelName&quot;:&quot;{name}&quot;,&quot;marshacode&quot;:&quot;{code}&quot;}}'
+    )
+    return (
+        f'class=" property-card" data-property="{data_property}">'
+        f'<span aria-hidden="false" class="m-price" aria-label="  now  {price}  ">{price}</span>'
+    )
 
 
 class FakeLocator:
@@ -44,8 +49,8 @@ class FakeLocator:
 
 
 class FakePage:
-    """Two pages of results; closes (raises PatchrightError) on the click
-    that would advance to a third page."""
+    """Two full pages of results; closes (raises PatchrightError) on the
+    click that would advance to a third page."""
 
     def __init__(self, pages_content: list[str]):
         self.pages_content = pages_content
@@ -101,28 +106,16 @@ class FakePlaywrightCtx:
         pass
 
 
-def test_closing_browser_on_page_two_returns_gracefully_and_keeps_results_in_store(
-    tmp_path, monkeypatch
-):
-    monkeypatch.setattr(hotel_list_store, "DATA_DIR", tmp_path / "hotel_list_cache")
-    monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
-
+def test_closing_browser_on_page_two_returns_page_one_results_instead_of_raising(monkeypatch):
     pages_content = [
-        _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
-        _property_card("H3", "Hotel Three"),
-        _property_card("H4", "Hotel Four"),  # never reached -- browser closes first
+        _property_card("H1", "Hotel One", "469") + _property_card("H2", "Hotel Two", "549"),
+        _property_card("H3", "Hotel Three", "431"),
+        _property_card("H4", "Hotel Four", "612"),  # never reached -- browser closes first
     ]
     fake_page = FakePage(pages_content)
 
-    monkeypatch.setattr(
-        marriott_prepay_module, "async_playwright", lambda: FakePlaywrightCtx(fake_page)
-    )
+    monkeypatch.setattr(marriott_module, "async_playwright", lambda: FakePlaywrightCtx(fake_page))
 
-    # Interrupted during initial listing (before any prepay checks), so no
-    # crash and no exception -- just an empty result for this call, same as
-    # if it had been called for the very first time with nothing found yet.
-    result = asyncio.run(search_prepay(REQ))
-    assert result == []
+    result = asyncio.run(search(REQ))
 
-    cached = hotel_list_store.load(REQ)
-    assert cached == [("H1", "Hotel One"), ("H2", "Hotel Two"), ("H3", "Hotel Three")]
+    assert [h.name for h in result] == ["Hotel One", "Hotel Two", "Hotel Three"]

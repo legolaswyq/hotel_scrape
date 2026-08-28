@@ -24,7 +24,7 @@ from patchright.async_api import Page, async_playwright
 
 from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper import hotel_list_store, prepay_store
-from backend.app.scraper.exceptions import ScraperBlockedError
+from backend.app.scraper.exceptions import ScraperBlockedError, ScraperInterruptedError
 from backend.app.scraper.marriott import (
     RATE_CARD_RE,
     SessionRotator,
@@ -123,11 +123,13 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
 
     Auto-recovers from blocks (see marriott.SessionRotator): a block during
     listing or a per-hotel check rotates to a fresh browser profile and
-    retries, rather than failing the whole call on the first block. If a
-    listing scan itself gets interrupted partway (block, crash), whatever
-    pages were fetched before that are still persisted -- the next call
-    resumes pagination from scratch on a fresh session, but nothing already
-    checked or found is lost either way, since that's saved incrementally.
+    retries, rather than failing the whole call on the first block.
+
+    If the browser window is closed manually (or crashes) partway through,
+    this returns whatever was already found/checked instead of raising --
+    both the listing progress and the per-hotel results are saved
+    incrementally as they happen (not just at the end), so nothing already
+    discovered is lost either way.
 
     Raises:
         ScraperBlockedError: still blocked after exhausting the profile pool.
@@ -139,30 +141,33 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
 
     async with async_playwright() as playwright:
         async with SessionRotator(playwright) as session:
-            if hotel_codes is None:
+            try:
+                if hotel_codes is None:
 
-                def on_progress(partial_codes):
-                    hotel_list_store.save(req, partial_codes)
+                    def on_progress(partial_codes):
+                        hotel_list_store.save(req, partial_codes)
 
-                hotel_codes = await session.run(
-                    lambda page: list_all_hotel_codes(page, req, on_progress=on_progress)
-                )
-                hotel_list_store.save(req, hotel_codes)
+                    hotel_codes = await session.run(
+                        lambda page: list_all_hotel_codes(page, req, on_progress=on_progress)
+                    )
+                    hotel_list_store.save(req, hotel_codes)
 
-            remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
-            batch = remaining[:limit] if limit is not None else remaining
+                remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
+                batch = remaining[:limit] if limit is not None else remaining
 
-            for i, (code, name) in enumerate(batch):
-                if i > 0:
-                    await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
+                for i, (code, name) in enumerate(batch):
+                    if i > 0:
+                        await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
 
-                async def check(page, code=code, name=name):
-                    return await _check_hotel_prepay(page, req, code, name, nights)
+                    async def check(page, code=code, name=name):
+                        return await _check_hotel_prepay(page, req, code, name, nights)
 
-                hotel = await session.run(check)
-                checked_codes.add(code)
-                if hotel is not None:
-                    results.append(hotel)
-                prepay_store.save(req, checked_codes, results)
+                    hotel = await session.run(check)
+                    checked_codes.add(code)
+                    if hotel is not None:
+                        results.append(hotel)
+                    prepay_store.save(req, checked_codes, results)
+            except ScraperInterruptedError:
+                pass
 
             return results

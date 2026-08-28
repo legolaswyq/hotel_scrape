@@ -414,9 +414,12 @@ async def list_all_hotel_codes(page, req: SearchRequest, on_progress=None) -> li
     return [(code, seen[code]) for code in order]
 
 
-async def list_all_hotels(page, req: SearchRequest) -> list[Hotel]:
+async def list_all_hotels(page, req: SearchRequest, on_progress=None) -> list[Hotel]:
     """Walk every results page, returning a Hotel per result, deduplicated by
     marshacode (cards without a marshacode are kept as-is, undeduped).
+
+    If `on_progress` is given, it's called with the accumulated list after
+    each page (not just at the end) -- see list_all_hotel_codes for why.
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
@@ -435,6 +438,8 @@ async def list_all_hotels(page, req: SearchRequest) -> list[Hotel]:
                 seen_codes.add(code)
             hotels.append(hotel)
             added = True
+        if on_progress is not None:
+            on_progress(list(hotels))
         if not added:
             break
 
@@ -447,11 +452,23 @@ async def search(req: SearchRequest) -> list[Hotel]:
     blocked (see SessionRotator).
 
     A legitimate zero-result search returns an empty list rather than raising.
+    If the browser window is closed manually (or crashes) partway through,
+    this returns whatever pages were already fetched instead of raising --
+    from the user's perspective, closing the window just means "stop here
+    and show me what you found", not a hard failure.
 
     Raises:
         ScraperBlockedError: still blocked after exhausting the profile pool.
         ScraperTimeoutError: the search flow did not reach a results page.
     """
+    partial: list[Hotel] = []
+
+    def on_progress(hotels_so_far: list[Hotel]) -> None:
+        partial[:] = hotels_so_far
+
     async with async_playwright() as playwright:
         async with SessionRotator(playwright) as session:
-            return await session.run(lambda page: list_all_hotels(page, req))
+            try:
+                return await session.run(lambda page: list_all_hotels(page, req, on_progress=on_progress))
+            except ScraperInterruptedError:
+                return partial

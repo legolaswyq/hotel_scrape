@@ -27,8 +27,8 @@ Marriott's search results page does not surface a separate total.
 
 import html
 import json
-import random
 import re
+import uuid
 from urllib.parse import quote_plus
 
 from patchright.async_api import Error as PatchrightError
@@ -86,15 +86,21 @@ _PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile_2"
 # context and opening a fresh one has recovered live, confirmed 2026-08-28
 # (a burst that got a profile blocked was unblocked by switching to a new,
 # never-used profile directory -- the block is keyed to session state, not
-# our IP). PROFILE_POOL_SIZE bounds how many fresh profiles a single call
-# will burn through before giving up and raising -- if every profile in the
-# pool is blocked, that's a stronger signal (network/IP-level) that
-# rotating further won't help.
-PROFILE_POOL_SIZE = 5
+# our IP). Rotated-to profiles are generated on demand -- a fresh,
+# randomly-named directory each time -- rather than drawn from a fixed,
+# reused pool of numbered paths (`_rot1`, `_rot2`, ...): a predictable set
+# of profile paths reused across every run is itself a fingerprint, and
+# it's what made concurrent sessions need pre-carved-out disjoint slices
+# to avoid colliding. MAX_PROFILE_ROTATIONS bounds how many a single call
+# will burn through before giving up and raising -- if that many fresh,
+# never-before-used profiles are all still blocked, that's a stronger
+# signal (network/IP-level) that rotating further won't help.
+MAX_PROFILE_ROTATIONS = 5
 
 
-def _profile_dir(index: int) -> str:
-    return _PROFILE_DIR if index == 0 else f"{_PROFILE_DIR}_rot{index}"
+def _new_profile_dir() -> str:
+    """A fresh, never-before-used browser profile directory."""
+    return f"{_PROFILE_DIR}_{uuid.uuid4().hex[:12]}"
 
 # Search results are paginated (40 hotels/page). Pagination is client-side
 # (an `<a href="#">` with a click handler, not a real navigation) --
@@ -168,13 +174,15 @@ class SessionRotator:
     window would fight a user who closed it on purpose). It surfaces as
     ScraperInterruptedError instead of an unhandled patchright error.
 
-    Pass an explicit `profile_dirs` list to give this instance its own
-    dedicated pool -- needed when running several SessionRotators
-    concurrently (e.g. parallel prepay-check workers), so two never try to
-    open the same profile directory at once. `randomize=True` shuffles
-    that pool's order (both the starting profile and the rotation
-    sequence), instead of always starting at index 0 -- so concurrent
-    workers, and repeated calls, don't all pile onto the same profile.
+    Pass `base_profile_dir` to start on a specific, stable profile (e.g.
+    the app's default one, which accumulates real cookies/history across
+    calls and reads more like a returning visitor than a throwaway one).
+    Leave it unset to start on a fresh random profile instead -- needed
+    when running several SessionRotators concurrently (e.g. parallel
+    prepay-check workers), since there's then no shared starting point
+    they could collide on. Every rotation after that (regardless of
+    `base_profile_dir`) always generates a brand new random profile --
+    never reused, never drawn from a fixed list.
 
     Usage:
         async with SessionRotator(playwright) as session:
@@ -184,21 +192,18 @@ class SessionRotator:
     def __init__(
         self,
         playwright,
-        profile_dirs: list[str] | None = None,
-        randomize: bool = False,
+        base_profile_dir: str | None = None,
+        max_rotations: int = MAX_PROFILE_ROTATIONS,
     ):
         self._playwright = playwright
-        self._profile_dirs = (
-            list(profile_dirs) if profile_dirs is not None else [_profile_dir(i) for i in range(PROFILE_POOL_SIZE)]
-        )
-        if randomize:
-            random.shuffle(self._profile_dirs)
-        self._pool_index = 0
+        self._base_profile_dir = base_profile_dir
+        self._max_rotations = max_rotations
+        self._rotations = 0
         self.context = None
         self.page = None
 
     async def __aenter__(self) -> "SessionRotator":
-        await self._launch()
+        await self._launch(self._base_profile_dir or _new_profile_dir())
         return self
 
     async def __aexit__(self, *exc_info):
@@ -213,9 +218,9 @@ class SessionRotator:
             # that's exactly the state we were trying to reach.
             pass
 
-    async def _launch(self) -> None:
+    async def _launch(self, profile_dir: str) -> None:
         self.context = await self._playwright.chromium.launch_persistent_context(
-            self._profile_dirs[self._pool_index],
+            profile_dir,
             channel="chrome",
             headless=False,
             no_viewport=True,
@@ -223,13 +228,13 @@ class SessionRotator:
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
     async def _rotate(self) -> None:
-        self._pool_index += 1
-        if self._pool_index >= len(self._profile_dirs):
+        self._rotations += 1
+        if self._rotations >= self._max_rotations:
             raise ScraperBlockedError(
-                f"Still blocked after rotating through {len(self._profile_dirs)} browser profiles"
+                f"Still blocked after rotating through {self._rotations} browser profiles"
             )
         await self._close_context()
-        await self._launch()
+        await self._launch(_new_profile_dir())
 
     async def run(self, coro_fn):
         """Call coro_fn(page), rotating profile and retrying on ScraperBlockedError.
@@ -486,7 +491,7 @@ async def search(req: SearchRequest) -> list[Hotel]:
         )
 
     async with async_playwright() as playwright:
-        async with SessionRotator(playwright) as session:
+        async with SessionRotator(playwright, base_profile_dir=_PROFILE_DIR) as session:
             try:
                 new_hotels = await session.run(
                     lambda page: list_all_hotels(

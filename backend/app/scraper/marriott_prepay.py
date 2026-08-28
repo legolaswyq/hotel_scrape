@@ -28,7 +28,7 @@ from patchright.async_api import Page, async_playwright
 from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper import prepay_store
 from backend.app.scraper.exceptions import ScraperBlockedError, ScraperInterruptedError
-from backend.app.scraper.marriott import RATE_CARD_RE, SessionRotator, _build_rates_url, _profile_dir
+from backend.app.scraper.marriott import RATE_CARD_RE, SessionRotator, _build_rates_url
 
 PREPAY_MARKER = "Prepay Non-refundable"
 PREPAY_CHUNK_SIZE = 6000
@@ -49,16 +49,14 @@ DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
 
 # Once the hotel list is known, checks run across several concurrent browser
-# sessions instead of one at a time -- each worker gets its own dedicated
-# slice of profile directories (never shared with another worker, since two
-# patchright contexts can't hold the same profile dir open at once) and
-# shuffles its own rotation order (`randomize=True` on SessionRotator), so
-# a block in one session doesn't correlate with which profile the next
-# worker picks. Workers still throttle between their own checks (see module
-# docstring) -- this trades total wall-clock time for more concurrent
-# "presence" against the site, not for skipping the per-check delay.
+# sessions instead of one at a time -- each worker's SessionRotator starts
+# on its own freshly-generated random profile (see marriott._new_profile_dir),
+# so nothing needs to be pre-carved into per-worker slices; two workers
+# generating random profiles independently isn't going to collide. Workers
+# still throttle between their own checks (see module docstring) -- this
+# trades total wall-clock time for more concurrent "presence" against the
+# site, not for skipping the per-check delay.
 PREPAY_WORKER_COUNT = 3
-PROFILES_PER_WORKER = 5
 
 # Default cap on how many new hotels a single check_prepay() call checks --
 # callers that want more (e.g. the frontend's "check more" button) pass an
@@ -139,7 +137,6 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
 
 async def _prepay_worker(
     playwright,
-    profile_dirs: list[str],
     queue: "asyncio.Queue[tuple[str, str]]",
     req: SearchRequest,
     nights: int,
@@ -147,12 +144,13 @@ async def _prepay_worker(
     results: list[Hotel],
 ) -> None:
     """Pull (code, name) pairs off the shared queue and check each for a
-    prepay rate, in its own dedicated browser session. Runs until the queue
-    is empty. If this worker's browser is closed/crashes, it just stops --
-    other workers keep going, and everything checked so far is already
-    saved (see the incremental prepay_store.save below).
+    prepay rate, in its own dedicated browser session (a fresh random
+    profile -- see SessionRotator). Runs until the queue is empty. If this
+    worker's browser is closed/crashes, it just stops -- other workers
+    keep going, and everything checked so far is already saved (see the
+    incremental prepay_store.save below).
     """
-    async with SessionRotator(playwright, profile_dirs=profile_dirs, randomize=True) as session:
+    async with SessionRotator(playwright) as session:
         first = True
         try:
             while True:
@@ -213,18 +211,11 @@ async def check_prepay(req: SearchRequest, hotels: list[Hotel], limit: int | Non
         for hotel in batch:
             queue.put_nowait((hotel.code, hotel.name))
 
-        total_profiles = PREPAY_WORKER_COUNT * PROFILES_PER_WORKER
-        all_profile_dirs = [_profile_dir(i) for i in range(total_profiles)]
-        worker_profile_chunks = [
-            all_profile_dirs[i * PROFILES_PER_WORKER : (i + 1) * PROFILES_PER_WORKER]
-            for i in range(PREPAY_WORKER_COUNT)
-        ]
-
         async with async_playwright() as playwright:
             await asyncio.gather(
                 *[
-                    _prepay_worker(playwright, chunk, queue, req, nights, checked_codes, results)
-                    for chunk in worker_profile_chunks
+                    _prepay_worker(playwright, queue, req, nights, checked_codes, results)
+                    for _ in range(PREPAY_WORKER_COUNT)
                 ]
             )
 

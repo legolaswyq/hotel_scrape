@@ -4,7 +4,7 @@ import pytest
 from patchright.async_api import Error as PatchrightError
 
 from backend.app.scraper.exceptions import ScraperBlockedError, ScraperInterruptedError
-from backend.app.scraper.marriott import PROFILE_POOL_SIZE, SessionRotator
+from backend.app.scraper.marriott import MAX_PROFILE_ROTATIONS, SessionRotator
 
 
 class FakeContext:
@@ -49,7 +49,36 @@ def test_run_returns_result_without_rotating_on_success():
     assert len(playwright.chromium.launched_profile_dirs) == 1
 
 
-def test_run_rotates_profile_and_retries_on_block_then_succeeds():
+def test_no_base_profile_dir_starts_on_a_fresh_random_profile_each_time():
+    """Without base_profile_dir, two separate SessionRotators must not
+    start on the same profile -- there's no fixed pool to draw a shared
+    starting point from (needed so concurrent sessions never collide)."""
+    playwright = FakePlaywright()
+
+    async def scenario():
+        async with SessionRotator(playwright):
+            pass
+        async with SessionRotator(playwright):
+            pass
+
+    asyncio.run(scenario())
+    dirs = playwright.chromium.launched_profile_dirs
+    assert len(dirs) == 2
+    assert dirs[0] != dirs[1]
+
+
+def test_base_profile_dir_is_used_for_the_first_launch():
+    playwright = FakePlaywright()
+
+    async def scenario():
+        async with SessionRotator(playwright, base_profile_dir="/tmp/my-stable-profile"):
+            pass
+
+    asyncio.run(scenario())
+    assert playwright.chromium.launched_profile_dirs == ["/tmp/my-stable-profile"]
+
+
+def test_run_rotates_to_a_fresh_random_profile_and_retries_on_block_then_succeeds():
     playwright = FakePlaywright()
     attempts = {"count": 0}
 
@@ -60,17 +89,23 @@ def test_run_rotates_profile_and_retries_on_block_then_succeeds():
         return "recovered"
 
     async def scenario():
-        async with SessionRotator(playwright) as session:
+        async with SessionRotator(playwright, base_profile_dir="/tmp/my-stable-profile") as session:
             return await session.run(flaky)
 
     result = asyncio.run(scenario())
     assert result == "recovered"
     assert attempts["count"] == 3
-    assert len(playwright.chromium.launched_profile_dirs) == 3
-    assert len(set(playwright.chromium.launched_profile_dirs)) == 3
+    dirs = playwright.chromium.launched_profile_dirs
+    assert len(dirs) == 3
+    assert len(set(dirs)) == 3
+    # The stable base profile was only used for the first attempt --
+    # rotations after a block are fresh, never-before-used profiles.
+    assert dirs[0] == "/tmp/my-stable-profile"
+    assert dirs[1] != "/tmp/my-stable-profile"
+    assert dirs[2] != "/tmp/my-stable-profile"
 
 
-def test_run_raises_after_exhausting_profile_pool():
+def test_run_raises_after_exhausting_max_rotations():
     playwright = FakePlaywright()
 
     async def always_blocked(page):
@@ -83,7 +118,7 @@ def test_run_raises_after_exhausting_profile_pool():
     with pytest.raises(ScraperBlockedError):
         asyncio.run(scenario())
 
-    assert len(playwright.chromium.launched_profile_dirs) == PROFILE_POOL_SIZE
+    assert len(playwright.chromium.launched_profile_dirs) == MAX_PROFILE_ROTATIONS
 
 
 def test_run_raises_interrupted_without_rotating_when_browser_closed():

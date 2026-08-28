@@ -32,12 +32,12 @@
     <label>Rooms
       <input type="number" name="rooms" value="1" min="1" required />
     </label>
-    <label>Limit (prepay only, optional)
+    <label>New hotels to check (prepay only, optional)
       <input type="number" id="prepay-limit" min="1" placeholder="all" />
     </label>
     <label style="flex-direction: row; align-items: center; gap: 0.4rem;">
       <input type="checkbox" id="prepay-only" style="width: auto;" />
-      Prepay rates only (slower — checks each hotel individually)
+      Prepay rates only (slower — checks each hotel individually; resumes from where it left off for the same search)
     </label>
     <button type="submit">Search</button>
   </form>

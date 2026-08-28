@@ -23,6 +23,7 @@ from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import Page, async_playwright
 
 from backend.app.models import Hotel, SearchRequest
+from backend.app.scraper import prepay_store
 from backend.app.scraper.exceptions import ScraperBlockedError
 from backend.app.scraper.marriott import (
     _PROFILE_DIR,
@@ -94,19 +95,29 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
 
 
 async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Hotel]:
-    """Return only hotels (from a Marriott search) that offer a Prepay Non-refundable rate.
+    """Return hotels (from a Marriott search) that offer a Prepay Non-refundable rate.
 
     Slow by design (see module docstring): one hotel rate page at a time,
     with a randomized delay between each, to avoid the block a fast burst
-    of requests triggered previously. `limit` caps how many of the search
-    result hotels are checked, in listed order -- useful for trying a
-    handful before committing to a full scan.
+    of requests triggered previously.
+
+    Progress persists to a local JSON file (prepay_store.py) keyed by
+    location/dates/guest count: hotels already checked in a prior call
+    with the same query are skipped, and `limit` caps how many *new*
+    (not-yet-checked) hotels this call checks -- so calling this
+    repeatedly with the same query and a small limit continues the scan
+    from where the last call left off, rather than re-checking from the
+    start. Pass limit=None to check all remaining unchecked hotels in one
+    call. The returned list is the full accumulated result set across all
+    calls for this query, not just this call's batch.
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
     """
     nights = (req.check_out - req.check_in).days
     search_url = _build_search_url(req)
+
+    checked_codes, results = prepay_store.load(req)
 
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
@@ -123,16 +134,17 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
             await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
 
             hotel_codes = _extract_hotel_codes(await page.content())
-            if limit is not None:
-                hotel_codes = hotel_codes[:limit]
+            remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
+            batch = remaining[:limit] if limit is not None else remaining
 
-            results: list[Hotel] = []
-            for i, (code, name) in enumerate(hotel_codes):
+            for i, (code, name) in enumerate(batch):
                 if i > 0:
                     await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
                 hotel = await _check_hotel_prepay(page, req, code, name, nights)
+                checked_codes.add(code)
                 if hotel is not None:
                     results.append(hotel)
+                prepay_store.save(req, checked_codes, results)
 
             return results
         finally:

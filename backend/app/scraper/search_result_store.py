@@ -8,6 +8,7 @@ One JSON file per distinct query lives under DATA_DIR, outside the repo
 """
 
 import json
+import re
 from pathlib import Path
 from typing import NamedTuple
 
@@ -23,6 +24,24 @@ class ListingProgress(NamedTuple):
     complete: bool
 
 
+# Cache files written before Hotel gained a `code` field have `code: null`
+# on every hotel -- which silently makes check_prepay() skip all of them
+# (it can't check a hotel it can't build a rate URL for) even though the
+# code is recoverable from the `propertyCode=` query param already saved
+# in each hotel's `url`. Backfill it on load instead of forcing a full
+# re-scrape of an otherwise-valid cache.
+_PROPERTY_CODE_RE = re.compile(r"propertyCode=([^&]+)")
+
+
+def _backfill_code(hotel: Hotel) -> Hotel:
+    if hotel.code or not hotel.url:
+        return hotel
+    match = _PROPERTY_CODE_RE.search(hotel.url)
+    if not match:
+        return hotel
+    return hotel.model_copy(update={"code": match.group(1)})
+
+
 def _path(req: SearchRequest) -> Path:
     return DATA_DIR / f"{query_key.key(req)}.json"
 
@@ -34,7 +53,7 @@ def load(req: SearchRequest) -> ListingProgress:
         return ListingProgress(hotels=[], pages_fetched=0, complete=False)
     data = json.loads(path.read_text())
     return ListingProgress(
-        hotels=[Hotel(**h) for h in data.get("hotels", [])],
+        hotels=[_backfill_code(Hotel(**h)) for h in data.get("hotels", [])],
         pages_fetched=data.get("pages_fetched", 0),
         complete=data.get("complete", False),
     )

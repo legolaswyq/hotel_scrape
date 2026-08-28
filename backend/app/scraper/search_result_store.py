@@ -1,12 +1,8 @@
-"""Local JSON-file cache of the hotel list for a search query, resumable
-across pagination pages.
-
-Marriott's search results are paginated (40 hotels per page) and there's
-no way to jump directly to page N -- reaching it means clicking through
-every page before it. This cache tracks not just the hotels found so far
-but how many pages have already been walked, so a later call for the same
-query (e.g. after the browser was closed mid-scan) can skip straight past
-those pages instead of re-fetching and re-extracting them.
+"""Local JSON-file cache of full search results for a query, resumable
+across pagination pages -- same idea as hotel_list_store.py, but storing
+full Hotel objects (with price/url) for the plain (non-prepay) search
+path, which has no separate reason to keep only the lighter code/name
+pairs.
 
 One JSON file per distinct query lives under DATA_DIR, outside the repo
 (gitignored) -- this is a cache file, not something to version.
@@ -16,14 +12,14 @@ import json
 from pathlib import Path
 from typing import NamedTuple
 
-from backend.app.models import SearchRequest
+from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper import query_key
 
-DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "hotel_list_cache"
+DATA_DIR = Path(__file__).resolve().parents[3] / "data" / "search_result_cache"
 
 
 class ListingProgress(NamedTuple):
-    hotels: list[tuple[str, str]]
+    hotels: list[Hotel]
     pages_fetched: int
     complete: bool
 
@@ -39,13 +35,13 @@ def load(req: SearchRequest) -> ListingProgress:
         return ListingProgress(hotels=[], pages_fetched=0, complete=False)
     data = json.loads(path.read_text())
     return ListingProgress(
-        hotels=[(code, name) for code, name in data.get("hotels", [])],
+        hotels=[Hotel(**h) for h in data.get("hotels", [])],
         pages_fetched=data.get("pages_fetched", 0),
         complete=data.get("complete", False),
     )
 
 
-def save(req: SearchRequest, hotels: list[tuple[str, str]], pages_fetched: int, complete: bool) -> None:
+def save(req: SearchRequest, hotels: list[Hotel], pages_fetched: int, complete: bool) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "location": req.location,
@@ -53,7 +49,7 @@ def save(req: SearchRequest, hotels: list[tuple[str, str]], pages_fetched: int, 
         "check_out": str(req.check_out),
         "adults": req.adults,
         "rooms": req.rooms,
-        "hotels": [[code, name] for code, name in hotels],
+        "hotels": [h.model_dump() for h in hotels],
         "pages_fetched": pages_fetched,
         "complete": complete,
     }

@@ -43,6 +43,20 @@ DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
 
 
+def _merge_codes(
+    known: list[tuple[str, str]], new: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Combine already-cached (code, name) pairs with freshly fetched ones,
+    deduping by code."""
+    seen = {code for code, _ in known}
+    merged = list(known)
+    for code, name in new:
+        if code not in seen:
+            seen.add(code)
+            merged.append((code, name))
+    return merged
+
+
 def _extract_prepay_member_price(page_html: str) -> float | None:
     """Tax-inclusive Member Rate price for the Prepay Non-refundable plan, if present."""
     idx = page_html.find(PREPAY_MARKER)
@@ -105,10 +119,13 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     with a randomized delay between each, to avoid the block a fast burst
     of requests triggered previously.
 
-    The full hotel list for this query is fetched once (walking every
-    results page, see marriott.list_all_hotel_codes) and cached in
-    hotel_list_store.py; later calls for the same query reuse the cached
-    list instead of re-paginating.
+    The full hotel list for this query is fetched by walking every results
+    page (see marriott.list_all_hotel_codes) and cached in
+    hotel_list_store.py, including how many pages have been walked so far.
+    A later call for the same query -- e.g. after the browser was closed
+    manually mid-pagination -- skips straight past those pages instead of
+    re-walking them from page 1. Once the listing is marked complete,
+    later calls skip pagination entirely and use the cached list.
 
     Which hotels have been checked and their results persist to a local
     JSON file (prepay_store.py) keyed by location/dates/guest count:
@@ -137,20 +154,33 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     nights = (req.check_out - req.check_in).days
 
     checked_codes, results = prepay_store.load(req)
-    hotel_codes = hotel_list_store.load(req)
+    known_codes, pages_fetched, complete = hotel_list_store.load(req)
 
     async with async_playwright() as playwright:
         async with SessionRotator(playwright) as session:
             try:
-                if hotel_codes is None:
+                if not complete:
+                    pages_done_this_call = 0
 
-                    def on_progress(partial_codes):
-                        hotel_list_store.save(req, partial_codes)
+                    def on_progress(codes_so_far):
+                        nonlocal pages_done_this_call
+                        pages_done_this_call += 1
+                        combined = _merge_codes(known_codes, codes_so_far)
+                        hotel_list_store.save(
+                            req, combined, pages_fetched + pages_done_this_call, complete=False
+                        )
 
-                    hotel_codes = await session.run(
-                        lambda page: list_all_hotel_codes(page, req, on_progress=on_progress)
+                    new_codes = await session.run(
+                        lambda page: list_all_hotel_codes(
+                            page, req, on_progress=on_progress, skip_pages=pages_fetched
+                        )
                     )
-                    hotel_list_store.save(req, hotel_codes)
+                    hotel_codes = _merge_codes(known_codes, new_codes)
+                    hotel_list_store.save(
+                        req, hotel_codes, pages_fetched + pages_done_this_call, complete=True
+                    )
+                else:
+                    hotel_codes = known_codes
 
                 remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
                 batch = remaining[:limit] if limit is not None else remaining

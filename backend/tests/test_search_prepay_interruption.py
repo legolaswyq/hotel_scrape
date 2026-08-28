@@ -44,13 +44,21 @@ class FakeLocator:
 
 
 class FakePage:
-    """Two pages of results; closes (raises PatchrightError) on the click
-    that would advance to a third page."""
+    """N pages of results; closes (raises PatchrightError) on the click that
+    would advance away from `close_on_page` (None = never closes). Each
+    `goto` resets to page 1, like a real fresh navigation would."""
 
-    def __init__(self, pages_content: list[str]):
+    def __init__(self, pages_content: list[str], close_on_page: int | None = 1):
         self.pages_content = pages_content
         self.state = {"page": 0}
-        self.goto = AsyncMock(return_value=AsyncMock(status=200))
+        self.close_on_page = close_on_page
+        self.click_count = 0
+
+        async def goto(*args, **kwargs):
+            self.state["page"] = 0
+            return AsyncMock(status=200)
+
+        self.goto = goto
         self.wait_for_selector = AsyncMock()
         self.wait_for_timeout = AsyncMock()
         self.title = AsyncMock(return_value="Where Can We Take You?")
@@ -61,7 +69,7 @@ class FakePage:
 
     def locator(self, _selector):
         is_last_page = self.state["page"] == len(self.pages_content) - 1
-        if self.state["page"] == 1:
+        if self.state["page"] == self.close_on_page:
 
             async def closed_click():
                 raise PatchrightError("Target page, context or browser has been closed")
@@ -69,6 +77,7 @@ class FakePage:
             return FakeLocator(exists=True, disabled=is_last_page, click=closed_click)
 
         async def advance():
+            self.click_count += 1
             self.state["page"] += 1
 
         return FakeLocator(exists=True, disabled=is_last_page, click=advance)
@@ -125,4 +134,49 @@ def test_closing_browser_on_page_two_returns_gracefully_and_keeps_results_in_sto
     assert result == []
 
     cached = hotel_list_store.load(REQ)
-    assert cached == [("H1", "Hotel One"), ("H2", "Hotel Two"), ("H3", "Hotel Three")]
+    assert cached.hotels == [("H1", "Hotel One"), ("H2", "Hotel Two"), ("H3", "Hotel Three")]
+    assert cached.pages_fetched == 2
+    assert cached.complete is False
+
+
+def test_second_call_resumes_from_page_three_without_reclicking_pages_one_and_two(
+    tmp_path, monkeypatch
+):
+    """After the interruption above (2 pages already cached), a second call
+    for the same query must skip straight to page 3 -- not re-click through
+    pages 1 and 2 it already has."""
+    monkeypatch.setattr(hotel_list_store, "DATA_DIR", tmp_path / "hotel_list_cache")
+    monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
+
+    pages_content = [
+        _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
+        _property_card("H3", "Hotel Three"),
+        _property_card("H4", "Hotel Four"),
+    ]
+
+    # First call: closes on page 2 (index 1), same as the scenario above.
+    interrupted_page = FakePage(pages_content, close_on_page=1)
+    monkeypatch.setattr(
+        marriott_prepay_module, "async_playwright", lambda: FakePlaywrightCtx(interrupted_page)
+    )
+    asyncio.run(search_prepay(REQ))
+    assert hotel_list_store.load(REQ).pages_fetched == 2
+
+    # Second call: doesn't close this time. If it resumed correctly (skip_pages=2),
+    # reaching page 3 (index 2) takes exactly 2 clicks -- not 2 (skip) + 2 (re-walk).
+    resumed_page = FakePage(pages_content, close_on_page=None)
+    monkeypatch.setattr(
+        marriott_prepay_module, "async_playwright", lambda: FakePlaywrightCtx(resumed_page)
+    )
+    asyncio.run(search_prepay(REQ, limit=0))  # limit=0: only care about the listing phase here
+
+    final = hotel_list_store.load(REQ)
+    assert final.hotels == [
+        ("H1", "Hotel One"),
+        ("H2", "Hotel Two"),
+        ("H3", "Hotel Three"),
+        ("H4", "Hotel Four"),
+    ]
+    assert final.pages_fetched == 3
+    assert final.complete is True
+    assert resumed_page.click_count == 2

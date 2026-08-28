@@ -35,6 +35,7 @@ from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import async_playwright
 
 from backend.app.models import Hotel, SearchRequest
+from backend.app.scraper import search_result_store
 from backend.app.scraper.exceptions import (
     ScraperBlockedError,
     ScraperInterruptedError,
@@ -322,9 +323,44 @@ def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[tup
     return hotels
 
 
-async def _walk_result_pages(page, req: SearchRequest):
+async def _advance_to_next_page(page, req: SearchRequest) -> bool:
+    """Click 'Next'. Returns False if there is no next page (already at the
+    end -- nothing to do). Raises if the click doesn't lead to a page of
+    cards (block or timeout), which used to look identical to "reached the
+    end" and silently corrupt the result as false-complete.
+    """
+    next_link = page.locator(NEXT_PAGE_SELECTOR).first
+    if await next_link.count() == 0:
+        return False
+    classes = await next_link.get_attribute("class") or ""
+    if "disabled" in classes:
+        return False
+
+    await next_link.click()
+    # Clicking briefly clears the results area entirely before the next
+    # page's cards render -- confirmed live: a fixed wait alone can land in
+    # that empty window. Wait for cards to reappear, then settle.
+    try:
+        await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+    except PatchrightTimeoutError as exc:
+        title = await page.title()
+        if "access denied" in title.lower():
+            raise ScraperBlockedError("Marriott blocked pagination mid-scan") from exc
+        raise ScraperTimeoutError(
+            f"Timed out waiting for the next page of results for '{req.location}'"
+        ) from exc
+    await page.wait_for_timeout(PAGINATION_CLICK_WAIT_MS)
+    return True
+
+
+async def _walk_result_pages(page, req: SearchRequest, skip_pages: int = 0):
     """Navigate to search results and yield each page's HTML in turn, clicking
     through pagination until the last page (or MAX_RESULT_PAGES as a safety cap).
+
+    `skip_pages` clicks through that many pages first WITHOUT yielding them
+    (no price-scroll/settle wait either, since their content is discarded)
+    -- for resuming a scan that already captured those pages in an earlier
+    call, without re-extracting them.
 
     The caller decides when to stop early (e.g. a page that added nothing new) by
     simply not continuing the `async for` loop.
@@ -352,38 +388,24 @@ async def _walk_result_pages(page, req: SearchRequest):
     # pagination link exists in the DOM before its click handler is wired up.
     await page.wait_for_timeout(PAGE_HYDRATION_WAIT_MS)
 
+    for _ in range(skip_pages):
+        if not await _advance_to_next_page(page, req):
+            # Fewer pages now than when skip_pages was recorded (results
+            # shifted) -- nothing left to skip past.
+            return
+
     for _ in range(MAX_RESULT_PAGES):
         yield await _wait_for_stable_prices(page)
-
-        next_link = page.locator(NEXT_PAGE_SELECTOR).first
-        if await next_link.count() == 0:
-            return
-        classes = await next_link.get_attribute("class") or ""
-        if "disabled" in classes:
+        if not await _advance_to_next_page(page, req):
             return
 
-        await next_link.click()
-        # Clicking briefly clears the results area entirely before the next
-        # page's cards render -- confirmed live: a fixed wait alone can land
-        # in that empty window. Wait for cards to reappear, then settle. If a
-        # block happens mid-pagination, cards never reappear -- without this
-        # check that silently looked like "reached the last page" instead of
-        # a block, corrupting the result as a false-complete list.
-        try:
-            await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
-        except PatchrightTimeoutError as exc:
-            title = await page.title()
-            if "access denied" in title.lower():
-                raise ScraperBlockedError("Marriott blocked pagination mid-scan") from exc
-            raise ScraperTimeoutError(
-                f"Timed out waiting for the next page of results for '{req.location}'"
-            ) from exc
-        await page.wait_for_timeout(PAGINATION_CLICK_WAIT_MS)
 
-
-async def list_all_hotel_codes(page, req: SearchRequest, on_progress=None) -> list[tuple[str, str]]:
-    """Walk every results page, returning (marshacode, hotelName) for every
-    hotel found, in listed order, deduplicated.
+async def list_all_hotel_codes(
+    page, req: SearchRequest, on_progress=None, skip_pages: int = 0
+) -> list[tuple[str, str]]:
+    """Walk every results page (after skipping `skip_pages` already-known
+    ones), returning (marshacode, hotelName) for every hotel found on the
+    pages actually walked, in listed order, deduplicated.
 
     If `on_progress` is given, it's called with the accumulated list after
     each page (not just at the end) -- so a caller that persists it can
@@ -397,7 +419,7 @@ async def list_all_hotel_codes(page, req: SearchRequest, on_progress=None) -> li
     seen: dict[str, str] = {}
     order: list[str] = []
 
-    async for page_html in _walk_result_pages(page, req):
+    async for page_html in _walk_result_pages(page, req, skip_pages=skip_pages):
         added = False
         for code, name in _extract_hotel_codes(page_html):
             if code not in seen:
@@ -414,9 +436,13 @@ async def list_all_hotel_codes(page, req: SearchRequest, on_progress=None) -> li
     return [(code, seen[code]) for code in order]
 
 
-async def list_all_hotels(page, req: SearchRequest, on_progress=None) -> list[Hotel]:
-    """Walk every results page, returning a Hotel per result, deduplicated by
-    marshacode (cards without a marshacode are kept as-is, undeduped).
+async def list_all_hotels(
+    page, req: SearchRequest, on_progress=None, skip_pages: int = 0
+) -> list[Hotel]:
+    """Walk every results page (after skipping `skip_pages` already-known
+    ones), returning a Hotel per result found on the pages actually walked,
+    deduplicated by marshacode (cards without a marshacode are kept as-is,
+    undeduped).
 
     If `on_progress` is given, it's called with the accumulated list after
     each page (not just at the end) -- see list_all_hotel_codes for why.
@@ -429,7 +455,7 @@ async def list_all_hotels(page, req: SearchRequest, on_progress=None) -> list[Ho
     seen_codes: set[str] = set()
     hotels: list[Hotel] = []
 
-    async for page_html in _walk_result_pages(page, req):
+    async for page_html in _walk_result_pages(page, req, skip_pages=skip_pages):
         added = False
         for code, hotel in _extract_hotels(page_html, req, nights):
             if code and code in seen_codes:
@@ -446,29 +472,63 @@ async def list_all_hotels(page, req: SearchRequest, on_progress=None) -> list[Ho
     return hotels
 
 
+def _merge_hotels(known: list[Hotel], new: list[Hotel]) -> list[Hotel]:
+    """Combine already-cached hotels with freshly fetched ones, deduping by
+    name (Hotel has no marshacode field -- name is a reasonable proxy)."""
+    seen_names = {h.name for h in known}
+    merged = list(known)
+    for hotel in new:
+        if hotel.name not in seen_names:
+            seen_names.add(hotel.name)
+            merged.append(hotel)
+    return merged
+
+
 async def search(req: SearchRequest) -> list[Hotel]:
     """Drive a real (patched) Chromium session through every page of marriott.com
     search results, auto-rotating to a fresh browser profile and retrying if
     blocked (see SessionRotator).
 
     A legitimate zero-result search returns an empty list rather than raising.
-    If the browser window is closed manually (or crashes) partway through,
-    this returns whatever pages were already fetched instead of raising --
-    from the user's perspective, closing the window just means "stop here
-    and show me what you found", not a hard failure.
+
+    Resumable across calls: progress (hotels found so far, how many pages
+    were walked, whether the listing is complete) persists to a local JSON
+    cache (search_result_store.py) keyed by location/dates/guest count. A
+    later call for the same query -- e.g. after the browser window was
+    closed manually partway through -- skips straight past the pages
+    already fetched instead of re-walking them from page 1. Once a listing
+    is marked complete, later calls just return the cached list.
 
     Raises:
         ScraperBlockedError: still blocked after exhausting the profile pool.
         ScraperTimeoutError: the search flow did not reach a results page.
     """
-    partial: list[Hotel] = []
+    known_hotels, pages_fetched, complete = search_result_store.load(req)
+    if complete:
+        return known_hotels
+
+    pages_done_this_call = 0
 
     def on_progress(hotels_so_far: list[Hotel]) -> None:
-        partial[:] = hotels_so_far
+        nonlocal pages_done_this_call
+        pages_done_this_call += 1
+        combined = _merge_hotels(known_hotels, hotels_so_far)
+        search_result_store.save(
+            req, combined, pages_fetched + pages_done_this_call, complete=False
+        )
 
     async with async_playwright() as playwright:
         async with SessionRotator(playwright) as session:
             try:
-                return await session.run(lambda page: list_all_hotels(page, req, on_progress=on_progress))
+                new_hotels = await session.run(
+                    lambda page: list_all_hotels(
+                        page, req, on_progress=on_progress, skip_pages=pages_fetched
+                    )
+                )
             except ScraperInterruptedError:
-                return partial
+                # Whatever on_progress already saved is the best we have.
+                return search_result_store.load(req).hotels
+
+    final = _merge_hotels(known_hotels, new_hotels)
+    search_result_store.save(req, final, pages_fetched + pages_done_this_call, complete=True)
+    return final

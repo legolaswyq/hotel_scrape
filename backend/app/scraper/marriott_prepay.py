@@ -26,8 +26,8 @@ from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper import hotel_list_store, prepay_store
 from backend.app.scraper.exceptions import ScraperBlockedError
 from backend.app.scraper.marriott import (
-    _PROFILE_DIR,
     RATE_CARD_RE,
+    SessionRotator,
     _build_rates_url,
     list_all_hotel_codes,
 )
@@ -74,7 +74,14 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
         await page.get_by_role("button", name="View Rates").first.click(
             timeout=VIEW_RATES_CLICK_TIMEOUT_MS
         )
-    except PatchrightTimeoutError:
+    except PatchrightTimeoutError as exc:
+        # A block can also show up as this click never finding its target
+        # (an Access Denied page has no "View Rates" button) -- without this
+        # check that silently looked identical to "no rate button rendered",
+        # permanently recording a blocked check as "no prepay available".
+        title = await page.title()
+        if "access denied" in title.lower():
+            raise ScraperBlockedError(f"Marriott blocked the request for {url}") from exc
         return None
 
     await page.wait_for_timeout(VIEW_RATES_RENDER_WAIT_MS)
@@ -114,8 +121,16 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     accumulated result set across all calls for this query, not just this
     call's batch.
 
+    Auto-recovers from blocks (see marriott.SessionRotator): a block during
+    listing or a per-hotel check rotates to a fresh browser profile and
+    retries, rather than failing the whole call on the first block. If a
+    listing scan itself gets interrupted partway (block, crash), whatever
+    pages were fetched before that are still persisted -- the next call
+    resumes pagination from scratch on a fresh session, but nothing already
+    checked or found is lost either way, since that's saved incrementally.
+
     Raises:
-        ScraperBlockedError: the site returned a 403 or an Akamai block page.
+        ScraperBlockedError: still blocked after exhausting the profile pool.
     """
     nights = (req.check_out - req.check_in).days
 
@@ -123,17 +138,15 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     hotel_codes = hotel_list_store.load(req)
 
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            _PROFILE_DIR,
-            channel="chrome",
-            headless=False,
-            no_viewport=True,
-        )
-        try:
-            page = context.pages[0] if context.pages else await context.new_page()
-
+        async with SessionRotator(playwright) as session:
             if hotel_codes is None:
-                hotel_codes = await list_all_hotel_codes(page, req)
+
+                def on_progress(partial_codes):
+                    hotel_list_store.save(req, partial_codes)
+
+                hotel_codes = await session.run(
+                    lambda page: list_all_hotel_codes(page, req, on_progress=on_progress)
+                )
                 hotel_list_store.save(req, hotel_codes)
 
             remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
@@ -142,12 +155,14 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
             for i, (code, name) in enumerate(batch):
                 if i > 0:
                     await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
-                hotel = await _check_hotel_prepay(page, req, code, name, nights)
+
+                async def check(page, code=code, name=name):
+                    return await _check_hotel_prepay(page, req, code, name, nights)
+
+                hotel = await session.run(check)
                 checked_codes.add(code)
                 if hotel is not None:
                     results.append(hotel)
                 prepay_store.save(req, checked_codes, results)
 
             return results
-        finally:
-            await context.close()

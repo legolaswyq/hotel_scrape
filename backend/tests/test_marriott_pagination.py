@@ -2,7 +2,11 @@ import asyncio
 from datetime import date
 from unittest.mock import AsyncMock
 
+import pytest
+from patchright.async_api import TimeoutError as PatchrightTimeoutError
+
 from backend.app.models import SearchRequest
+from backend.app.scraper.exceptions import ScraperBlockedError
 from backend.app.scraper.marriott import list_all_hotel_codes, list_all_hotels
 
 REQ = SearchRequest(
@@ -91,6 +95,22 @@ def test_stops_when_next_link_absent():
     assert result == [("H1", "Hotel One")]
 
 
+def test_list_all_hotel_codes_reports_progress_after_each_page():
+    pages_content = [
+        _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
+        _property_card("H3", "Hotel Three"),
+    ]
+    page = FakePage(pages_content)
+    snapshots = []
+
+    asyncio.run(list_all_hotel_codes(page, REQ, on_progress=snapshots.append))
+
+    assert snapshots == [
+        [("H1", "Hotel One"), ("H2", "Hotel Two")],
+        [("H1", "Hotel One"), ("H2", "Hotel Two"), ("H3", "Hotel Three")],
+    ]
+
+
 def test_list_all_hotels_walks_all_pages_and_dedupes():
     pages_content = [
         _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
@@ -101,3 +121,27 @@ def test_list_all_hotels_walks_all_pages_and_dedupes():
     result = asyncio.run(list_all_hotels(page, REQ))
 
     assert [h.name for h in result] == ["Hotel One", "Hotel Two", "Hotel Three"]
+
+
+def test_block_mid_pagination_raises_instead_of_silently_truncating():
+    """A block after a 'Next' click used to look identical to 'no more
+    hotels' (no cards render, so nothing gets added) and would silently
+    return a truncated-but-marked-complete list. It must now surface as a
+    ScraperBlockedError instead."""
+    pages_content = [_property_card("H1", "Hotel One"), _property_card("H2", "Hotel Two")]
+    page = FakePage(pages_content)
+
+    call_count = {"n": 0}
+    real_wait_for_selector = page.wait_for_selector
+
+    async def wait_for_selector_then_block(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return await real_wait_for_selector(*args, **kwargs)
+        raise PatchrightTimeoutError("timed out")
+
+    page.wait_for_selector = wait_for_selector_then_block
+    page.title = AsyncMock(return_value="Access Denied")
+
+    with pytest.raises(ScraperBlockedError):
+        asyncio.run(list_all_hotel_codes(page, REQ))

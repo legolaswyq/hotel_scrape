@@ -75,6 +75,20 @@ RATE_CARD_RE = re.compile(
 
 _PROFILE_DIR = "/tmp/hotel_scrape_patchright_profile_2"
 
+# Session rotation: when Akamai blocks the current profile, closing that
+# context and opening a fresh one has recovered live, confirmed 2026-08-28
+# (a burst that got a profile blocked was unblocked by switching to a new,
+# never-used profile directory -- the block is keyed to session state, not
+# our IP). PROFILE_POOL_SIZE bounds how many fresh profiles a single call
+# will burn through before giving up and raising -- if every profile in the
+# pool is blocked, that's a stronger signal (network/IP-level) that
+# rotating further won't help.
+PROFILE_POOL_SIZE = 5
+
+
+def _profile_dir(index: int) -> str:
+    return _PROFILE_DIR if index == 0 else f"{_PROFILE_DIR}_rot{index}"
+
 # Search results are paginated (40 hotels/page). Pagination is client-side
 # (an `<a href="#">` with a click handler, not a real navigation) --
 # confirmed live on 2026-08-28. The "NextPage" link gains a `disabled`
@@ -124,6 +138,57 @@ def _build_rates_url(req: SearchRequest, code: str) -> str:
         rooms=req.rooms,
         adults=req.adults,
     )
+
+
+class SessionRotator:
+    """Runs work against a patchright page, auto-rotating to a fresh browser
+    profile and retrying when a ScraperBlockedError is raised, instead of
+    failing the whole call on the first block encountered.
+
+    Usage:
+        async with SessionRotator(playwright) as session:
+            result = await session.run(lambda page: some_scrape_fn(page, ...))
+    """
+
+    def __init__(self, playwright):
+        self._playwright = playwright
+        self._profile_index = 0
+        self.context = None
+        self.page = None
+
+    async def __aenter__(self) -> "SessionRotator":
+        await self._launch()
+        return self
+
+    async def __aexit__(self, *exc_info):
+        if self.context is not None:
+            await self.context.close()
+
+    async def _launch(self) -> None:
+        self.context = await self._playwright.chromium.launch_persistent_context(
+            _profile_dir(self._profile_index),
+            channel="chrome",
+            headless=False,
+            no_viewport=True,
+        )
+        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
+
+    async def _rotate(self) -> None:
+        self._profile_index += 1
+        if self._profile_index >= PROFILE_POOL_SIZE:
+            raise ScraperBlockedError(
+                f"Still blocked after rotating through {PROFILE_POOL_SIZE} browser profiles"
+            )
+        await self.context.close()
+        await self._launch()
+
+    async def run(self, coro_fn):
+        """Call coro_fn(page), rotating profile and retrying on ScraperBlockedError."""
+        while True:
+            try:
+                return await coro_fn(self.page)
+            except ScraperBlockedError:
+                await self._rotate()
 
 
 async def _wait_for_stable_prices(page) -> str:
@@ -246,14 +311,30 @@ async def _walk_result_pages(page, req: SearchRequest):
         await next_link.click()
         # Clicking briefly clears the results area entirely before the next
         # page's cards render -- confirmed live: a fixed wait alone can land
-        # in that empty window. Wait for cards to reappear, then settle.
-        await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+        # in that empty window. Wait for cards to reappear, then settle. If a
+        # block happens mid-pagination, cards never reappear -- without this
+        # check that silently looked like "reached the last page" instead of
+        # a block, corrupting the result as a false-complete list.
+        try:
+            await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
+        except PatchrightTimeoutError as exc:
+            title = await page.title()
+            if "access denied" in title.lower():
+                raise ScraperBlockedError("Marriott blocked pagination mid-scan") from exc
+            raise ScraperTimeoutError(
+                f"Timed out waiting for the next page of results for '{req.location}'"
+            ) from exc
         await page.wait_for_timeout(PAGINATION_CLICK_WAIT_MS)
 
 
-async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]]:
+async def list_all_hotel_codes(page, req: SearchRequest, on_progress=None) -> list[tuple[str, str]]:
     """Walk every results page, returning (marshacode, hotelName) for every
     hotel found, in listed order, deduplicated.
+
+    If `on_progress` is given, it's called with the accumulated list after
+    each page (not just at the end) -- so a caller that persists it can
+    recover whatever was found so far even if a later page raises (e.g. a
+    block partway through a long pagination walk).
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
@@ -269,6 +350,8 @@ async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]
                 seen[code] = name
                 order.append(code)
                 added = True
+        if on_progress is not None:
+            on_progress([(code, seen[code]) for code in order])
         if not added:
             # Safety valve: a page that added nothing new would otherwise
             # keep the generator clicking through pages forever.
@@ -306,23 +389,15 @@ async def list_all_hotels(page, req: SearchRequest) -> list[Hotel]:
 
 async def search(req: SearchRequest) -> list[Hotel]:
     """Drive a real (patched) Chromium session through every page of marriott.com
-    search results.
+    search results, auto-rotating to a fresh browser profile and retrying if
+    blocked (see SessionRotator).
 
     A legitimate zero-result search returns an empty list rather than raising.
 
     Raises:
-        ScraperBlockedError: the site returned a 403 or an Akamai block page.
+        ScraperBlockedError: still blocked after exhausting the profile pool.
         ScraperTimeoutError: the search flow did not reach a results page.
     """
     async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            _PROFILE_DIR,
-            channel="chrome",
-            headless=False,
-            no_viewport=True,
-        )
-        try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            return await list_all_hotels(page, req)
-        finally:
-            await context.close()
+        async with SessionRotator(playwright) as session:
+            return await session.run(lambda page: list_all_hotels(page, req))

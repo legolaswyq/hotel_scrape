@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
 from backend.app.models import (
@@ -29,6 +29,7 @@ async def search_history():
     return SearchHistoryResponse(
         searches=[
             SearchHistoryEntry(
+                key=s.key,
                 location=s.location,
                 check_in=s.check_in,
                 check_out=s.check_out,
@@ -41,6 +42,17 @@ async def search_history():
             for s in summaries
         ]
     )
+
+
+@router.get("/api/search-history/{key}", response_model=SearchResponse)
+async def search_history_detail(key: str):
+    """The cached hotel list (price, url, supports_prepay -- everything
+    already scraped) for one past search, identified by the key
+    /api/search-history reports. Read-only -- never triggers a scrape."""
+    progress = search_result_store.load_by_key(key)
+    if progress is None:
+        raise HTTPException(status_code=404, detail="No cached search found for that key")
+    return SearchResponse(hotels=progress.hotels)
 
 
 @router.post("/api/search", response_model=SearchResponse)

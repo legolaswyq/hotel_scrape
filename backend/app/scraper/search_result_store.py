@@ -25,6 +25,7 @@ class ListingProgress(NamedTuple):
 
 
 class SearchSummary(NamedTuple):
+    key: str
     location: str
     check_in: str
     check_out: str
@@ -58,17 +59,39 @@ def _path(req: SearchRequest) -> Path:
     return DATA_DIR / f"{query_key.key(req)}.json"
 
 
-def load(req: SearchRequest) -> ListingProgress:
-    """Return cached progress for this query. All-empty/incomplete if never cached."""
-    path = _path(req)
-    if not path.exists():
-        return ListingProgress(hotels=[], pages_fetched=0, complete=False)
-    data = json.loads(path.read_text())
+def _progress_from_json(data: dict) -> ListingProgress:
     return ListingProgress(
         hotels=[_backfill_code(Hotel(**h)) for h in data.get("hotels", [])],
         pages_fetched=data.get("pages_fetched", 0),
         complete=data.get("complete", False),
     )
+
+
+def load(req: SearchRequest) -> ListingProgress:
+    """Return cached progress for this query. All-empty/incomplete if never cached."""
+    path = _path(req)
+    if not path.exists():
+        return ListingProgress(hotels=[], pages_fetched=0, complete=False)
+    return _progress_from_json(json.loads(path.read_text()))
+
+
+_KEY_RE = re.compile(r"^[0-9a-f]{16}$")
+
+
+def load_by_key(key: str) -> ListingProgress | None:
+    """Same as load(), but by the cache key list_all() reports directly --
+    for showing a past search's results without needing to reconstruct a
+    SearchRequest (or re-trigger a scrape) for it. None if the key doesn't
+    correspond to a cache file (e.g. it was cleared since list_all() ran)
+    or isn't a well-formed key (query_key.key()'s format -- rejected
+    up front since this value comes from the request path and a
+    malformed one could otherwise be used to escape DATA_DIR)."""
+    if not _KEY_RE.match(key):
+        return None
+    path = DATA_DIR / f"{key}.json"
+    if not path.exists():
+        return None
+    return _progress_from_json(json.loads(path.read_text()))
 
 
 def list_all() -> list[SearchSummary]:
@@ -84,6 +107,7 @@ def list_all() -> list[SearchSummary]:
         hotels = data.get("hotels", [])
         summaries.append(
             SearchSummary(
+                key=path.stem,
                 location=data.get("location", ""),
                 check_in=data.get("check_in", ""),
                 check_out=data.get("check_out", ""),

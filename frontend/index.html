@@ -4,7 +4,9 @@
   <meta charset="utf-8" />
   <title>Hotel Scrape — Marriott</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; }
+    body { font-family: system-ui, sans-serif; max-width: 1100px; margin: 2rem auto; padding: 0 1rem; }
+    .layout { display: flex; gap: 2.5rem; align-items: flex-start; }
+    .main { flex: 1; min-width: 0; }
     form { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; }
     label { display: flex; flex-direction: column; font-size: 0.85rem; }
     input { padding: 0.4rem; font-size: 1rem; }
@@ -14,7 +16,9 @@
     th.sortable { cursor: pointer; user-select: none; }
     th.sortable:hover { background: #f5f5f5; }
     #error { color: #b00020; margin-top: 1rem; }
-    #history { margin-top: 1.5rem; }
+    #history {
+      width: 280px; flex-shrink: 0; position: sticky; top: 1rem;
+    }
     #history h2 { font-size: 1rem; margin-bottom: 0.5rem; }
     #history ul { list-style: none; padding: 0; margin: 0; }
     #history li {
@@ -22,50 +26,59 @@
       margin-bottom: 0.4rem; cursor: pointer; font-size: 0.85rem;
     }
     #history li:hover { background: #f5f5f5; }
+    #history li.active { border-color: #333; background: #f0f0f0; }
     #history .meta { color: #666; }
+    @media (max-width: 800px) {
+      .layout { flex-direction: column; }
+      #history { width: 100%; position: static; }
+    }
   </style>
 </head>
 <body>
   <h1>Find a Marriott Room</h1>
-  <form id="search-form">
-    <label>Location
-      <input type="text" name="location" placeholder="New York, NY" required />
-    </label>
-    <label>Adults
-      <input type="number" name="adults" value="1" min="1" required />
-    </label>
-    <label>Check-in
-      <input type="date" name="check_in" required />
-    </label>
-    <label>Check-out
-      <input type="date" name="check_out" required />
-    </label>
-    <label>Rooms
-      <input type="number" name="rooms" value="1" min="1" required />
-    </label>
-    <label>Hotels to check for prepay (optional)
-      <input type="number" id="prepay-limit" min="1" value="10" />
-    </label>
-    <button type="submit">Search</button>
-  </form>
-  <p style="font-size: 0.8rem; color: #666;">
-    After listing hotels, that many are checked individually for a prepay
-    rate (slower — resumes from where it left off on a repeat search).
-  </p>
+  <div class="layout">
+    <div class="main">
+      <form id="search-form">
+        <label>Location
+          <input type="text" name="location" placeholder="New York, NY" required />
+        </label>
+        <label>Adults
+          <input type="number" name="adults" value="1" min="1" required />
+        </label>
+        <label>Check-in
+          <input type="date" name="check_in" required />
+        </label>
+        <label>Check-out
+          <input type="date" name="check_out" required />
+        </label>
+        <label>Rooms
+          <input type="number" name="rooms" value="1" min="1" required />
+        </label>
+        <label>Hotels to check for prepay (optional)
+          <input type="number" id="prepay-limit" min="1" value="10" />
+        </label>
+        <button type="submit">Search</button>
+      </form>
+      <p style="font-size: 0.8rem; color: #666;">
+        After listing hotels, that many are checked individually for a prepay
+        rate (slower — resumes from where it left off on a repeat search).
+      </p>
 
-  <div id="history" hidden>
-    <h2>Recent searches</h2>
-    <ul></ul>
+      <div id="error" hidden></div>
+      <table id="results" hidden>
+        <thead>
+          <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th id="prepay-header" class="sortable">Prepay ▾</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <button id="check-more" type="button" hidden style="width: 100%; padding: 0.6rem; font-size: 1rem; cursor: pointer; margin-top: 1rem;"></button>
+    </div>
+
+    <aside id="history" hidden>
+      <h2>Search history</h2>
+      <ul></ul>
+    </aside>
   </div>
-
-  <div id="error" hidden></div>
-  <table id="results" hidden>
-    <thead>
-      <tr><th>Hotel</th><th>Price / night</th><th>Total</th><th id="prepay-header" class="sortable">Prepay ▾</th></tr>
-    </thead>
-    <tbody></tbody>
-  </table>
-  <button id="check-more" type="button" hidden style="width: 100%; padding: 0.6rem; font-size: 1rem; cursor: pointer; margin-top: 1rem;"></button>
 
   <script>
     const form = document.getElementById("search-form");
@@ -137,6 +150,49 @@
       form.elements.rooms.value = entry.rooms;
     }
 
+    function showResults(hotels) {
+      currentHotels = hotels;
+      prepaySortDescending = true;
+      prepayHeader.textContent = "Prepay ▾";
+      renderRows([...currentHotels].sort((a, b) => prepayRank(a) - prepayRank(b)));
+      resultsEl.hidden = false;
+      updateCheckMoreButton();
+    }
+
+    async function showHistoryEntry(entry, li) {
+      errorEl.hidden = true;
+      for (const item of historyList.children) item.classList.remove("active");
+      li.classList.add("active");
+
+      // Fills the form and remembers this query so "check more" can
+      // resume checking prepay for it without a fresh scrape.
+      fillFormFrom(entry);
+      lastSearchData = {
+        location: entry.location,
+        check_in: entry.check_in,
+        check_out: entry.check_out,
+        adults: entry.adults,
+        rooms: entry.rooms,
+      };
+
+      let response, body;
+      try {
+        response = await fetch(`/api/search-history/${entry.key}`);
+        body = await response.json();
+      } catch (err) {
+        errorEl.textContent = "Couldn't load that search's results.";
+        errorEl.hidden = false;
+        return;
+      }
+      if (!response.ok) {
+        errorEl.textContent = body.detail || "Couldn't load that search's results.";
+        errorEl.hidden = false;
+        return;
+      }
+
+      showResults(body.hotels);
+    }
+
     async function loadHistory() {
       let response, body;
       try {
@@ -156,10 +212,7 @@
         const prepayNote = entry.prepay_checked_count > 0 ? `, ${entry.prepay_checked_count} prepay-checked` : "";
         li.innerHTML = `${entry.location} · ${entry.check_in} → ${entry.check_out} · ${entry.adults} adult(s), ${entry.rooms} room(s)
           <div class="meta">${entry.hotel_count} hotels${entry.complete ? "" : " (partial)"}${prepayNote}</div>`;
-        li.addEventListener("click", () => {
-          fillFormFrom(entry);
-          form.requestSubmit();
-        });
+        li.addEventListener("click", () => showHistoryEntry(entry, li));
         historyList.appendChild(li);
       }
       historyEl.hidden = false;
@@ -189,15 +242,7 @@
         return;
       }
 
-      currentHotels = body.hotels;
-      renderRows(
-        [...currentHotels].sort((a, b) => {
-          const diff = prepayRank(a) - prepayRank(b);
-          return prepaySortDescending ? diff : -diff;
-        })
-      );
-      resultsEl.hidden = false;
-      updateCheckMoreButton();
+      showResults(body.hotels);
       loadHistory();
     }
 

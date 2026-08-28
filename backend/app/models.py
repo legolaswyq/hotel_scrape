@@ -36,6 +36,7 @@ class SearchResponse(BaseModel):
 
 
 class SearchHistoryEntry(BaseModel):
+    key: str
     location: str
     check_in: str
     check_out: str

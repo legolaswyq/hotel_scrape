@@ -70,3 +70,30 @@ def test_list_all_orders_most_recently_saved_first(tmp_path, monkeypatch):
 
     summaries = search_result_store.list_all()
     assert summaries[0].location == "New York, NY"
+
+
+def test_load_by_key_returns_cached_hotels(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_result_store, "DATA_DIR", tmp_path)
+    hotels = [Hotel(name="A", price_per_night=100.0, total_price=200.0, currency="USD", code="A")]
+    search_result_store.save(REQ_NYC, hotels, pages_fetched=1, complete=True)
+
+    key = search_result_store.list_all()[0].key
+    progress = search_result_store.load_by_key(key)
+
+    assert progress is not None
+    assert [h.name for h in progress.hotels] == ["A"]
+    assert progress.complete is True
+
+
+def test_load_by_key_returns_none_for_unknown_key(tmp_path, monkeypatch):
+    monkeypatch.setattr(search_result_store, "DATA_DIR", tmp_path)
+    assert search_result_store.load_by_key("0000000000000000") is None
+
+
+def test_load_by_key_rejects_malformed_key_instead_of_touching_the_filesystem(tmp_path, monkeypatch):
+    """A key that isn't the expected 16-hex-char format must be rejected up
+    front -- it comes straight from the request path, and building a path
+    from it unchecked (e.g. "../../etc/passwd") would be a traversal risk."""
+    monkeypatch.setattr(search_result_store, "DATA_DIR", tmp_path)
+    assert search_result_store.load_by_key("../../etc/passwd") is None
+    assert search_result_store.load_by_key("not-hex!!") is None

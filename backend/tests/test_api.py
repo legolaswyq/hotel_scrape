@@ -110,6 +110,7 @@ def test_search_returns_listing_when_prepay_check_is_blocked(mock_search, mock_c
 def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
     mock_list_all.return_value = [
         SearchSummary(
+            key="aaaa000000000001",
             location="New York, NY",
             check_in="2026-09-11",
             check_out="2026-09-13",
@@ -121,6 +122,7 @@ def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
             searched_at=2.0,
         ),
         SearchSummary(
+            key="bbbb000000000002",
             location="Chicago, IL",
             check_in="2026-10-01",
             check_out="2026-10-03",
@@ -139,6 +141,7 @@ def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
     assert response.json() == {
         "searches": [
             {
+                "key": "aaaa000000000001",
                 "location": "New York, NY",
                 "check_in": "2026-09-11",
                 "check_out": "2026-09-13",
@@ -149,6 +152,7 @@ def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
                 "complete": True,
             },
             {
+                "key": "bbbb000000000002",
                 "location": "Chicago, IL",
                 "check_in": "2026-10-01",
                 "check_out": "2026-10-03",
@@ -160,3 +164,24 @@ def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
             },
         ]
     }
+
+
+@patch("backend.app.api.search_result_store.load_by_key")
+def test_search_history_detail_returns_cached_hotels(mock_load_by_key):
+    from backend.app.scraper.search_result_store import ListingProgress
+
+    hotel = Hotel(name="Test Hotel", price_per_night=100.0, total_price=200.0, currency="USD", code="TEST")
+    mock_load_by_key.return_value = ListingProgress(hotels=[hotel], pages_fetched=1, complete=True)
+
+    response = client.get("/api/search-history/aaaa000000000001")
+
+    assert response.status_code == 200
+    assert response.json()["hotels"][0]["name"] == "Test Hotel"
+    mock_load_by_key.assert_called_once_with("aaaa000000000001")
+
+
+@patch("backend.app.api.search_result_store.load_by_key")
+def test_search_history_detail_404s_for_unknown_key(mock_load_by_key):
+    mock_load_by_key.return_value = None
+    response = client.get("/api/search-history/0000000000000000")
+    assert response.status_code == 404

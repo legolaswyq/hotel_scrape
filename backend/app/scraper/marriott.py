@@ -84,6 +84,15 @@ PAGE_HYDRATION_WAIT_MS = 3_000
 PAGINATION_CLICK_WAIT_MS = 2_500
 MAX_RESULT_PAGES = 20
 
+# Price labels for a page's cards render staggered, slightly after the
+# cards themselves -- confirmed live: reading page content right after
+# cards appear (single fixed wait) left many cards with no price captured,
+# worse after pagination clicks than on the first page. Poll until the
+# number of rendered price labels stops increasing instead of guessing a
+# fixed wait long enough for every card.
+PRICE_POLL_INTERVAL_MS = 1_000
+PRICE_POLL_MAX_ATTEMPTS = 6
+
 
 def _parse_location(location: str) -> tuple[str, str]:
     """Split 'City, ST' into (city, state). Only US 'City, ST' input is supported."""
@@ -115,6 +124,20 @@ def _build_rates_url(req: SearchRequest, code: str) -> str:
         rooms=req.rooms,
         adults=req.adults,
     )
+
+
+async def _wait_for_stable_prices(page) -> str:
+    """Poll page content until the count of rendered price labels stops growing."""
+    previous_count = -1
+    content = await page.content()
+    for _ in range(PRICE_POLL_MAX_ATTEMPTS):
+        current_count = len(DISPLAYED_PRICE_RE.findall(content))
+        if current_count == previous_count:
+            break
+        previous_count = current_count
+        await page.wait_for_timeout(PRICE_POLL_INTERVAL_MS)
+        content = await page.content()
+    return content
 
 
 def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
@@ -211,7 +234,7 @@ async def _walk_result_pages(page, req: SearchRequest):
     await page.wait_for_timeout(PAGE_HYDRATION_WAIT_MS)
 
     for _ in range(MAX_RESULT_PAGES):
-        yield await page.content()
+        yield await _wait_for_stable_prices(page)
 
         next_link = page.locator(NEXT_PAGE_SELECTOR).first
         if await next_link.count() == 0:

@@ -1,7 +1,9 @@
+import asyncio
 from datetime import date
+from unittest.mock import AsyncMock
 
 from backend.app.models import SearchRequest
-from backend.app.scraper.marriott import _build_rates_url, _extract_hotels
+from backend.app.scraper.marriott import _build_rates_url, _extract_hotels, _wait_for_stable_prices
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -53,3 +55,36 @@ def test_extract_hotels_url_is_none_without_marshacode():
     code, hotel = hotels[0]
     assert code is None
     assert hotel.url is None
+
+
+def _price_labels(count: int) -> str:
+    return "".join(f'aria-label="  now  {100 + i}  "' for i in range(count))
+
+
+class FakePricePage:
+    """Simulates prices rendering in over successive .content() reads, then
+    stabilizing at `final_count`."""
+
+    def __init__(self, growth: list[int]):
+        self._growth = growth
+        self._call = 0
+        self.wait_for_timeout = AsyncMock()
+
+    async def content(self):
+        count = self._growth[min(self._call, len(self._growth) - 1)]
+        self._call += 1
+        return _price_labels(count)
+
+
+def test_wait_for_stable_prices_polls_until_count_stops_growing():
+    page = FakePricePage(growth=[2, 5, 8, 8])
+    result = asyncio.run(_wait_for_stable_prices(page))
+    assert len(result.split("aria-label")) - 1 == 8
+    assert page._call == 4
+
+
+def test_wait_for_stable_prices_returns_immediately_if_already_stable():
+    page = FakePricePage(growth=[6, 6])
+    result = asyncio.run(_wait_for_stable_prices(page))
+    assert len(result.split("aria-label")) - 1 == 6
+    assert page._call == 2

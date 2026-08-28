@@ -135,8 +135,10 @@ def _extract_hotel_codes(page_html: str) -> list[tuple[str, str]]:
     return codes
 
 
-def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[Hotel]:
-    hotels: list[Hotel] = []
+def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[tuple[str | None, Hotel]]:
+    """Return (marshacode, Hotel) per result card -- the code is exposed so
+    callers can dedupe across multiple pages of results."""
+    hotels: list[tuple[str | None, Hotel]] = []
     for chunk in page_html.split(PROPERTY_CARD_SPLIT)[1:]:
         prop_match = DATA_PROPERTY_RE.search(chunk)
         if not prop_match:
@@ -164,20 +166,26 @@ def _extract_hotels(page_html: str, req: SearchRequest, nights: int) -> list[Hot
         url = _build_rates_url(req, code) if code else None
 
         hotels.append(
-            Hotel(
-                name=name,
-                price_per_night=price_per_night,
-                total_price=total_price,
-                currency=data.get("currency", "USD"),
-                url=url,
+            (
+                code,
+                Hotel(
+                    name=name,
+                    price_per_night=price_per_night,
+                    total_price=total_price,
+                    currency=data.get("currency", "USD"),
+                    url=url,
+                ),
             )
         )
     return hotels
 
 
-async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]]:
-    """Navigate to the search results and walk every pagination page, returning
-    (marshacode, hotelName) for every hotel found, in listed order, deduplicated.
+async def _walk_result_pages(page, req: SearchRequest):
+    """Navigate to search results and yield each page's HTML in turn, clicking
+    through pagination until the last page (or MAX_RESULT_PAGES as a safety cap).
+
+    The caller decides when to stop early (e.g. a page that added nothing new) by
+    simply not continuing the `async for` loop.
 
     Raises:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
@@ -202,27 +210,15 @@ async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]
     # pagination link exists in the DOM before its click handler is wired up.
     await page.wait_for_timeout(PAGE_HYDRATION_WAIT_MS)
 
-    seen: dict[str, str] = {}
-    order: list[str] = []
-
     for _ in range(MAX_RESULT_PAGES):
-        added = False
-        for code, name in _extract_hotel_codes(await page.content()):
-            if code not in seen:
-                seen[code] = name
-                order.append(code)
-                added = True
+        yield await page.content()
 
         next_link = page.locator(NEXT_PAGE_SELECTOR).first
         if await next_link.count() == 0:
-            break
+            return
         classes = await next_link.get_attribute("class") or ""
         if "disabled" in classes:
-            break
-        if not added:
-            # Safety valve: a page that added nothing new but still has an
-            # enabled Next link would otherwise loop forever.
-            break
+            return
 
         await next_link.click()
         # Clicking briefly clears the results area entirely before the next
@@ -231,11 +227,63 @@ async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]
         await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
         await page.wait_for_timeout(PAGINATION_CLICK_WAIT_MS)
 
+
+async def list_all_hotel_codes(page, req: SearchRequest) -> list[tuple[str, str]]:
+    """Walk every results page, returning (marshacode, hotelName) for every
+    hotel found, in listed order, deduplicated.
+
+    Raises:
+        ScraperBlockedError: the site returned a 403 or an Akamai block page.
+        ScraperTimeoutError: the search flow did not reach a results page.
+    """
+    seen: dict[str, str] = {}
+    order: list[str] = []
+
+    async for page_html in _walk_result_pages(page, req):
+        added = False
+        for code, name in _extract_hotel_codes(page_html):
+            if code not in seen:
+                seen[code] = name
+                order.append(code)
+                added = True
+        if not added:
+            # Safety valve: a page that added nothing new would otherwise
+            # keep the generator clicking through pages forever.
+            break
+
     return [(code, seen[code]) for code in order]
 
 
+async def list_all_hotels(page, req: SearchRequest) -> list[Hotel]:
+    """Walk every results page, returning a Hotel per result, deduplicated by
+    marshacode (cards without a marshacode are kept as-is, undeduped).
+
+    Raises:
+        ScraperBlockedError: the site returned a 403 or an Akamai block page.
+        ScraperTimeoutError: the search flow did not reach a results page.
+    """
+    nights = (req.check_out - req.check_in).days
+    seen_codes: set[str] = set()
+    hotels: list[Hotel] = []
+
+    async for page_html in _walk_result_pages(page, req):
+        added = False
+        for code, hotel in _extract_hotels(page_html, req, nights):
+            if code and code in seen_codes:
+                continue
+            if code:
+                seen_codes.add(code)
+            hotels.append(hotel)
+            added = True
+        if not added:
+            break
+
+    return hotels
+
+
 async def search(req: SearchRequest) -> list[Hotel]:
-    """Drive a real (patched) Chromium session through marriott.com search results.
+    """Drive a real (patched) Chromium session through every page of marriott.com
+    search results.
 
     A legitimate zero-result search returns an empty list rather than raising.
 
@@ -243,9 +291,6 @@ async def search(req: SearchRequest) -> list[Hotel]:
         ScraperBlockedError: the site returned a 403 or an Akamai block page.
         ScraperTimeoutError: the search flow did not reach a results page.
     """
-    url = _build_search_url(req)
-    nights = (req.check_out - req.check_in).days
-
     async with async_playwright() as playwright:
         context = await playwright.chromium.launch_persistent_context(
             _PROFILE_DIR,
@@ -255,21 +300,6 @@ async def search(req: SearchRequest) -> list[Hotel]:
         )
         try:
             page = context.pages[0] if context.pages else await context.new_page()
-            response = await page.goto(url, wait_until="domcontentloaded")
-            if response is not None and response.status == 403:
-                raise ScraperBlockedError(f"Marriott returned 403 for {url}")
-
-            try:
-                await page.wait_for_selector(PROPERTY_CARD_SELECTOR, timeout=RESULTS_TIMEOUT_MS)
-            except PatchrightTimeoutError as exc:
-                title = await page.title()
-                if "access denied" in title.lower():
-                    raise ScraperBlockedError(f"Marriott blocked the request for {url}") from exc
-                raise ScraperTimeoutError(
-                    f"Timed out waiting for Marriott results for '{req.location}'"
-                ) from exc
-
-            page_html = await page.content()
-            return _extract_hotels(page_html, req, nights)
+            return await list_all_hotels(page, req)
         finally:
             await context.close()

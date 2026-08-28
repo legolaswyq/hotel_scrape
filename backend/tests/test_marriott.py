@@ -36,9 +36,11 @@ def test_extract_hotels_includes_rate_page_url():
     page_html = _property_card("Courtyard Test", "NYCES", "469")
     hotels = _extract_hotels(page_html, REQ, nights=2)
     assert len(hotels) == 1
-    assert hotels[0].name == "Courtyard Test"
-    assert hotels[0].url is not None
-    assert "propertyCode=NYCES" in hotels[0].url
+    code, hotel = hotels[0]
+    assert code == "NYCES"
+    assert hotel.name == "Courtyard Test"
+    assert hotel.url is not None
+    assert "propertyCode=NYCES" in hotel.url
 
 
 def test_extract_hotels_url_is_none_without_marshacode():
@@ -48,4 +50,6 @@ def test_extract_hotels_url_is_none_without_marshacode():
     )
     hotels = _extract_hotels(page_html, REQ, nights=2)
     assert len(hotels) == 1
-    assert hotels[0].url is None
+    code, hotel = hotels[0]
+    assert code is None
+    assert hotel.url is None

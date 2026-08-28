@@ -3,7 +3,7 @@ from datetime import date
 from unittest.mock import AsyncMock
 
 from backend.app.models import SearchRequest
-from backend.app.scraper.marriott import list_all_hotel_codes
+from backend.app.scraper.marriott import list_all_hotel_codes, list_all_hotels
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -89,3 +89,15 @@ def test_stops_when_next_link_absent():
     result = asyncio.run(list_all_hotel_codes(page, REQ))
 
     assert result == [("H1", "Hotel One")]
+
+
+def test_list_all_hotels_walks_all_pages_and_dedupes():
+    pages_content = [
+        _property_card("H1", "Hotel One") + _property_card("H2", "Hotel Two"),
+        _property_card("H2", "Hotel Two") + _property_card("H3", "Hotel Three"),
+    ]
+    page = FakePage(pages_content)
+
+    result = asyncio.run(list_all_hotels(page, REQ))
+
+    assert [h.name for h in result] == ["Hotel One", "Hotel Two", "Hotel Three"]

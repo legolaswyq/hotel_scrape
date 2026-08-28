@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 from backend.app.main import app
 from backend.app.models import Hotel
-from backend.app.scraper.exceptions import ScraperBlockedError
+from backend.app.scraper.exceptions import ScraperBlockedError, ScraperInterruptedError
 
 client = TestClient(app)
 
@@ -46,6 +46,14 @@ def test_search_success(mock_search):
 @patch("backend.app.api.search", new_callable=AsyncMock)
 def test_search_blocked_returns_502(mock_search):
     mock_search.side_effect = ScraperBlockedError("blocked")
+    response = client.post("/api/search", json=VALID_PAYLOAD)
+    assert response.status_code == 502
+    assert "error" in response.json()
+
+
+@patch("backend.app.api.search", new_callable=AsyncMock)
+def test_search_interrupted_returns_502(mock_search):
+    mock_search.side_effect = ScraperInterruptedError("Browser session ended unexpectedly")
     response = client.post("/api/search", json=VALID_PAYLOAD)
     assert response.status_code == 502
     assert "error" in response.json()
@@ -98,6 +106,14 @@ def test_search_prepay_passes_limit_query_param(mock_search_prepay):
 @patch("backend.app.api.search_prepay", new_callable=AsyncMock)
 def test_search_prepay_blocked_returns_502(mock_search_prepay):
     mock_search_prepay.side_effect = ScraperBlockedError("blocked")
+    response = client.post("/api/search-prepay", json=VALID_PAYLOAD)
+    assert response.status_code == 502
+    assert "error" in response.json()
+
+
+@patch("backend.app.api.search_prepay", new_callable=AsyncMock)
+def test_search_prepay_interrupted_returns_502(mock_search_prepay):
+    mock_search_prepay.side_effect = ScraperInterruptedError("Browser session ended unexpectedly")
     response = client.post("/api/search-prepay", json=VALID_PAYLOAD)
     assert response.status_code == 502
     assert "error" in response.json()

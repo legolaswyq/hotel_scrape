@@ -30,11 +30,16 @@ import json
 import re
 from urllib.parse import quote_plus
 
+from patchright.async_api import Error as PatchrightError
 from patchright.async_api import TimeoutError as PatchrightTimeoutError
 from patchright.async_api import async_playwright
 
 from backend.app.models import Hotel, SearchRequest
-from backend.app.scraper.exceptions import ScraperBlockedError, ScraperTimeoutError
+from backend.app.scraper.exceptions import (
+    ScraperBlockedError,
+    ScraperInterruptedError,
+    ScraperTimeoutError,
+)
 
 SEARCH_URL_TEMPLATE = (
     "https://www.marriott.com/search/findHotels.mi"
@@ -155,6 +160,12 @@ class SessionRotator:
     profile and retrying when a ScraperBlockedError is raised, instead of
     failing the whole call on the first block encountered.
 
+    If the browser window is closed manually (or the browser process
+    crashes) mid-scrape, that's a different failure mode -- not a site
+    block -- and is NOT auto-retried (rotating and popping open a new
+    window would fight a user who closed it on purpose). It surfaces as
+    ScraperInterruptedError instead of an unhandled patchright error.
+
     Usage:
         async with SessionRotator(playwright) as session:
             result = await session.run(lambda page: some_scrape_fn(page, ...))
@@ -172,7 +183,15 @@ class SessionRotator:
 
     async def __aexit__(self, *exc_info):
         if self.context is not None:
+            await self._close_context()
+
+    async def _close_context(self) -> None:
+        try:
             await self.context.close()
+        except PatchrightError:
+            # Already gone (e.g. the window was closed manually) -- fine,
+            # that's exactly the state we were trying to reach.
+            pass
 
     async def _launch(self) -> None:
         self.context = await self._playwright.chromium.launch_persistent_context(
@@ -189,16 +208,25 @@ class SessionRotator:
             raise ScraperBlockedError(
                 f"Still blocked after rotating through {PROFILE_POOL_SIZE} browser profiles"
             )
-        await self.context.close()
+        await self._close_context()
         await self._launch()
 
     async def run(self, coro_fn):
-        """Call coro_fn(page), rotating profile and retrying on ScraperBlockedError."""
+        """Call coro_fn(page), rotating profile and retrying on ScraperBlockedError.
+
+        Raises:
+            ScraperInterruptedError: the browser session ended unexpectedly
+                (window closed manually, browser crashed) -- not retried.
+        """
         while True:
             try:
                 return await coro_fn(self.page)
             except ScraperBlockedError:
                 await self._rotate()
+            except PatchrightError as exc:
+                raise ScraperInterruptedError(
+                    "Browser session ended unexpectedly (window closed or browser crashed)"
+                ) from exc
 
 
 async def _scroll_through_page(page) -> None:

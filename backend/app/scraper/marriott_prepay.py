@@ -50,6 +50,11 @@ DELAY_MAX_SECONDS = 12.0
 PREPAY_WORKER_COUNT = 3
 PROFILES_PER_WORKER = 5
 
+# Default cap on how many new hotels a single check_prepay() call checks --
+# callers that want more (e.g. the frontend's "check more" button) pass an
+# explicit larger limit.
+DEFAULT_PREPAY_LIMIT = 10
+
 
 def _extract_prepay_member_price(page_html: str) -> float | None:
     """Tax-inclusive Member Rate price for the Prepay Non-refundable plan, if present."""

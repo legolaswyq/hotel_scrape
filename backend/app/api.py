@@ -15,7 +15,7 @@ from backend.app.scraper.exceptions import (
     ScraperTimeoutError,
 )
 from backend.app.scraper.marriott import search
-from backend.app.scraper.marriott_prepay import check_prepay
+from backend.app.scraper.marriott_prepay import DEFAULT_PREPAY_LIMIT, check_prepay
 
 router = APIRouter()
 
@@ -56,10 +56,12 @@ async def search_history_detail(key: str):
 
 
 @router.post("/api/search", response_model=SearchResponse)
-async def search_hotels(req: SearchRequest, prepay_limit: int | None = None):
+async def search_hotels(req: SearchRequest, prepay_limit: int = DEFAULT_PREPAY_LIMIT):
     """List every hotel for this search, then check each for a Prepay
     Non-refundable rate (see check_prepay) -- `hotel.supports_prepay` is
     True/False once checked, None if not yet checked this call.
+    `prepay_limit` defaults to DEFAULT_PREPAY_LIMIT new hotels per call;
+    pass a larger value (e.g. from the "check more" flow) to check more.
 
     If listing itself fails, the whole request fails (502) -- there's
     nothing to show. If prepay checking fails/blocks partway through, the

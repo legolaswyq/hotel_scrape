@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import backend.app.scraper.marriott_prepay as marriott_prepay_module
 from backend.app.models import Hotel, SearchRequest
 from backend.app.scraper import prepay_store
-from backend.app.scraper.marriott_prepay import check_prepay
+from backend.app.scraper.marriott_prepay import PREPAY_WORKER_COUNT, check_prepay
 
 REQ = SearchRequest(
     location="New York, NY",
@@ -122,6 +122,24 @@ def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeyp
     # not a single session churning through all six hotels serially.
     assert len(fake_ctx.chromium.launched_profile_dirs) > 1
     assert len(set(fake_ctx.chromium.launched_profile_dirs)) == len(fake_ctx.chromium.launched_profile_dirs)
+
+
+def test_always_launches_exactly_worker_count_sessions_even_with_fewer_candidates(tmp_path, monkeypatch):
+    """PREPAY_WORKER_COUNT (3) browser sessions must spin up regardless of
+    batch size -- even a single hotel to check launches 3 sessions (the
+    other 2 just find an empty queue and exit immediately), rather than
+    scaling worker count down with the batch."""
+    monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MAX_SECONDS", 0.0)
+
+    fake_ctx = FakePlaywrightCtx()
+    monkeypatch.setattr(marriott_prepay_module, "async_playwright", lambda: fake_ctx)
+
+    hotels = [HOTELS[0].model_copy()]
+    asyncio.run(check_prepay(REQ, hotels))
+
+    assert len(fake_ctx.chromium.launched_profile_dirs) == PREPAY_WORKER_COUNT
 
 
 def test_second_call_with_limit_only_checks_new_hotels(tmp_path, monkeypatch):

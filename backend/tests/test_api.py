@@ -61,7 +61,7 @@ def test_search_success(mock_search, mock_check_prepay):
     }
     mock_check_prepay.assert_awaited_once()
     _, kwargs = mock_check_prepay.call_args
-    assert kwargs["limit"] is None
+    assert kwargs["limit"] == 10  # DEFAULT_PREPAY_LIMIT when not passed explicitly
 
 
 @patch("backend.app.api.check_prepay", new_callable=AsyncMock)

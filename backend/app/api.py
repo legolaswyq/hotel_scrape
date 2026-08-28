@@ -79,4 +79,11 @@ async def search_hotels(req: SearchRequest, prepay_limit: int | None = None):
     except (ScraperBlockedError, ScraperTimeoutError, ScraperInterruptedError):
         pass
 
+    # check_prepay() only annotates hotel.supports_prepay in memory --
+    # persist it back into the search-result cache too, so a later
+    # /api/search-history/{key} view (which reads that cache directly,
+    # without re-running check_prepay) reflects prepay status as well.
+    progress = search_result_store.load(req)
+    search_result_store.save(req, hotels, progress.pages_fetched, progress.complete)
+
     return SearchResponse(hotels=hotels)

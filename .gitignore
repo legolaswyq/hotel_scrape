@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# hotel_scrape prepay scan progress cache
-data/prepay_cache/
+# hotel_scrape local scrape/progress caches
+data/

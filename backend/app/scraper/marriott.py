@@ -27,6 +27,7 @@ Marriott's search results page does not surface a separate total.
 
 import html
 import json
+import random
 import re
 from urllib.parse import quote_plus
 
@@ -167,14 +168,32 @@ class SessionRotator:
     window would fight a user who closed it on purpose). It surfaces as
     ScraperInterruptedError instead of an unhandled patchright error.
 
+    Pass an explicit `profile_dirs` list to give this instance its own
+    dedicated pool -- needed when running several SessionRotators
+    concurrently (e.g. parallel prepay-check workers), so two never try to
+    open the same profile directory at once. `randomize=True` shuffles
+    that pool's order (both the starting profile and the rotation
+    sequence), instead of always starting at index 0 -- so concurrent
+    workers, and repeated calls, don't all pile onto the same profile.
+
     Usage:
         async with SessionRotator(playwright) as session:
             result = await session.run(lambda page: some_scrape_fn(page, ...))
     """
 
-    def __init__(self, playwright):
+    def __init__(
+        self,
+        playwright,
+        profile_dirs: list[str] | None = None,
+        randomize: bool = False,
+    ):
         self._playwright = playwright
-        self._profile_index = 0
+        self._profile_dirs = (
+            list(profile_dirs) if profile_dirs is not None else [_profile_dir(i) for i in range(PROFILE_POOL_SIZE)]
+        )
+        if randomize:
+            random.shuffle(self._profile_dirs)
+        self._pool_index = 0
         self.context = None
         self.page = None
 
@@ -196,7 +215,7 @@ class SessionRotator:
 
     async def _launch(self) -> None:
         self.context = await self._playwright.chromium.launch_persistent_context(
-            _profile_dir(self._profile_index),
+            self._profile_dirs[self._pool_index],
             channel="chrome",
             headless=False,
             no_viewport=True,
@@ -204,10 +223,10 @@ class SessionRotator:
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 
     async def _rotate(self) -> None:
-        self._profile_index += 1
-        if self._profile_index >= PROFILE_POOL_SIZE:
+        self._pool_index += 1
+        if self._pool_index >= len(self._profile_dirs):
             raise ScraperBlockedError(
-                f"Still blocked after rotating through {PROFILE_POOL_SIZE} browser profiles"
+                f"Still blocked after rotating through {len(self._profile_dirs)} browser profiles"
             )
         await self._close_context()
         await self._launch()

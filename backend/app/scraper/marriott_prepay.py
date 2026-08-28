@@ -29,6 +29,7 @@ from backend.app.scraper.marriott import (
     RATE_CARD_RE,
     SessionRotator,
     _build_rates_url,
+    _profile_dir,
     list_all_hotel_codes,
 )
 
@@ -41,6 +42,18 @@ VIEW_RATES_RENDER_WAIT_MS = 2_500
 
 DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
+
+# Once the hotel list is known, checks run across several concurrent browser
+# sessions instead of one at a time -- each worker gets its own dedicated
+# slice of profile directories (never shared with another worker, since two
+# patchright contexts can't hold the same profile dir open at once) and
+# shuffles its own rotation order (`randomize=True` on SessionRotator), so
+# a block in one session doesn't correlate with which profile the next
+# worker picks. Workers still throttle between their own checks (see module
+# docstring) -- this trades total wall-clock time for more concurrent
+# "presence" against the site, not for skipping the per-check delay.
+PREPAY_WORKER_COUNT = 3
+PROFILES_PER_WORKER = 5
 
 
 def _merge_codes(
@@ -112,12 +125,48 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
     )
 
 
+async def _prepay_worker(
+    playwright,
+    profile_dirs: list[str],
+    queue: "asyncio.Queue[tuple[str, str]]",
+    req: SearchRequest,
+    nights: int,
+    checked_codes: set[str],
+    results: list[Hotel],
+) -> None:
+    """Pull (code, name) pairs off the shared queue and check each for a
+    prepay rate, in its own dedicated browser session. Runs until the queue
+    is empty. If this worker's browser is closed/crashes, it just stops --
+    other workers keep going, and everything checked so far is already
+    saved (see the incremental prepay_store.save below).
+    """
+    async with SessionRotator(playwright, profile_dirs=profile_dirs, randomize=True) as session:
+        first = True
+        try:
+            while True:
+                try:
+                    code, name = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+
+                if not first:
+                    await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
+                first = False
+
+                async def check(page, code=code, name=name):
+                    return await _check_hotel_prepay(page, req, code, name, nights)
+
+                hotel = await session.run(check)
+                checked_codes.add(code)
+                if hotel is not None:
+                    results.append(hotel)
+                prepay_store.save(req, checked_codes, results)
+        except ScraperInterruptedError:
+            return
+
+
 async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Hotel]:
     """Return hotels (from a Marriott search) that offer a Prepay Non-refundable rate.
-
-    Slow by design (see module docstring): one hotel rate page at a time,
-    with a randomized delay between each, to avoid the block a fast burst
-    of requests triggered previously.
 
     The full hotel list for this query is fetched by walking every results
     page (see marriott.list_all_hotel_codes) and cached in
@@ -127,29 +176,34 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     re-walking them from page 1. Once the listing is marked complete,
     later calls skip pagination entirely and use the cached list.
 
-    Which hotels have been checked and their results persist to a local
-    JSON file (prepay_store.py) keyed by location/dates/guest count:
-    hotels already checked in a prior call with the same query are
-    skipped, and `limit` caps how many *new* (not-yet-checked) hotels this
-    call checks -- so calling this repeatedly with the same query and a
-    small limit continues the scan from where the last call left off,
-    rather than re-checking from the start. Pass limit=None to check all
-    remaining unchecked hotels in one call. The returned list is the full
-    accumulated result set across all calls for this query, not just this
-    call's batch.
+    Once the hotel list is known, per-hotel prepay checks run across
+    PREPAY_WORKER_COUNT concurrent browser sessions (see module docstring
+    on PREPAY_WORKER_COUNT) pulling from a shared queue, each still
+    throttled between its own checks. Which hotels have been checked and
+    their results persist to a local JSON file (prepay_store.py) keyed by
+    location/dates/guest count: hotels already checked in a prior call with
+    the same query are skipped, and `limit` caps how many *new*
+    (not-yet-checked) hotels this call checks -- so calling this repeatedly
+    with the same query and a small limit continues the scan from where the
+    last call left off, rather than re-checking from the start. Pass
+    limit=None to check all remaining unchecked hotels in one call. The
+    returned list is the full accumulated result set across all calls for
+    this query, not just this call's batch.
 
     Auto-recovers from blocks (see marriott.SessionRotator): a block during
-    listing or a per-hotel check rotates to a fresh browser profile and
-    retries, rather than failing the whole call on the first block.
+    listing or a per-hotel check rotates that session to a fresh browser
+    profile and retries, rather than failing the whole call on the first
+    block.
 
-    If the browser window is closed manually (or crashes) partway through,
-    this returns whatever was already found/checked instead of raising --
-    both the listing progress and the per-hotel results are saved
-    incrementally as they happen (not just at the end), so nothing already
-    discovered is lost either way.
+    If a browser window is closed manually (or crashes) partway through,
+    the affected session stops (other concurrent sessions keep going)
+    instead of raising -- both the listing progress and the per-hotel
+    results are saved incrementally as they happen (not just at the end),
+    so nothing already discovered is lost either way.
 
     Raises:
-        ScraperBlockedError: still blocked after exhausting the profile pool.
+        ScraperBlockedError: a session is still blocked after exhausting
+            its own profile pool.
     """
     nights = (req.check_out - req.check_in).days
 
@@ -157,20 +211,20 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
     known_codes, pages_fetched, complete = hotel_list_store.load(req)
 
     async with async_playwright() as playwright:
-        async with SessionRotator(playwright) as session:
-            try:
-                if not complete:
-                    pages_done_this_call = 0
+        if not complete:
+            pages_done_this_call = 0
 
-                    def on_progress(codes_so_far):
-                        nonlocal pages_done_this_call
-                        pages_done_this_call += 1
-                        combined = _merge_codes(known_codes, codes_so_far)
-                        hotel_list_store.save(
-                            req, combined, pages_fetched + pages_done_this_call, complete=False
-                        )
+            def on_progress(codes_so_far):
+                nonlocal pages_done_this_call
+                pages_done_this_call += 1
+                combined = _merge_codes(known_codes, codes_so_far)
+                hotel_list_store.save(
+                    req, combined, pages_fetched + pages_done_this_call, complete=False
+                )
 
-                    new_codes = await session.run(
+            async with SessionRotator(playwright) as listing_session:
+                try:
+                    new_codes = await listing_session.run(
                         lambda page: list_all_hotel_codes(
                             page, req, on_progress=on_progress, skip_pages=pages_fetched
                         )
@@ -179,25 +233,32 @@ async def search_prepay(req: SearchRequest, limit: int | None = None) -> list[Ho
                     hotel_list_store.save(
                         req, hotel_codes, pages_fetched + pages_done_this_call, complete=True
                     )
-                else:
-                    hotel_codes = known_codes
+                except ScraperInterruptedError:
+                    return results
+        else:
+            hotel_codes = known_codes
 
-                remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
-                batch = remaining[:limit] if limit is not None else remaining
-
-                for i, (code, name) in enumerate(batch):
-                    if i > 0:
-                        await asyncio.sleep(random.uniform(DELAY_MIN_SECONDS, DELAY_MAX_SECONDS))
-
-                    async def check(page, code=code, name=name):
-                        return await _check_hotel_prepay(page, req, code, name, nights)
-
-                    hotel = await session.run(check)
-                    checked_codes.add(code)
-                    if hotel is not None:
-                        results.append(hotel)
-                    prepay_store.save(req, checked_codes, results)
-            except ScraperInterruptedError:
-                pass
-
+        remaining = [(code, name) for code, name in hotel_codes if code not in checked_codes]
+        batch = remaining[:limit] if limit is not None else remaining
+        if not batch:
             return results
+
+        queue: asyncio.Queue = asyncio.Queue()
+        for item in batch:
+            queue.put_nowait(item)
+
+        total_profiles = PREPAY_WORKER_COUNT * PROFILES_PER_WORKER
+        all_profile_dirs = [_profile_dir(i) for i in range(total_profiles)]
+        worker_profile_chunks = [
+            all_profile_dirs[i * PROFILES_PER_WORKER : (i + 1) * PROFILES_PER_WORKER]
+            for i in range(PREPAY_WORKER_COUNT)
+        ]
+
+        await asyncio.gather(
+            *[
+                _prepay_worker(playwright, chunk, queue, req, nights, checked_codes, results)
+                for chunk in worker_profile_chunks
+            ]
+        )
+
+        return results

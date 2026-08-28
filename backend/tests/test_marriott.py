@@ -69,6 +69,7 @@ class FakePricePage:
         self._growth = growth
         self._call = 0
         self.wait_for_timeout = AsyncMock()
+        self.evaluate = AsyncMock(return_value=True)
 
     async def content(self):
         count = self._growth[min(self._call, len(self._growth) - 1)]

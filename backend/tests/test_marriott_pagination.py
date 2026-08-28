@@ -54,6 +54,7 @@ class FakePage:
         self.wait_for_selector = AsyncMock()
         self.wait_for_timeout = AsyncMock()
         self.title = AsyncMock(return_value="Where Can We Take You?")
+        self.evaluate = AsyncMock(return_value=True)
 
     async def content(self):
         return self.pages_content[self.state["page"]]

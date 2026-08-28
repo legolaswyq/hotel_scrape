@@ -107,6 +107,16 @@ MAX_RESULT_PAGES = 20
 PRICE_POLL_INTERVAL_MS = 1_000
 PRICE_POLL_MAX_ATTEMPTS = 6
 
+# Card prices lazy-render only once scrolled into view -- confirmed live: a
+# freshly loaded results page has prices for only the first ~10 of 40 cards
+# until scrolled (images and other card content likely lazy too, but price
+# is what we extract). Scroll down in increments, not straight to the
+# bottom, so every card actually passes through the viewport and triggers
+# whatever intersection-based loading Marriott's page uses.
+SCROLL_STEP_PX = 2_000
+SCROLL_STEP_WAIT_MS = 500
+SCROLL_MAX_STEPS = 30
+
 
 def _parse_location(location: str) -> tuple[str, str]:
     """Split 'City, ST' into (city, state). Only US 'City, ST' input is supported."""
@@ -191,8 +201,24 @@ class SessionRotator:
                 await self._rotate()
 
 
+async def _scroll_through_page(page) -> None:
+    """Step down the page in increments until reaching the bottom (or the
+    safety cap), so every card passes through the viewport."""
+    for _ in range(SCROLL_MAX_STEPS):
+        reached_bottom = await page.evaluate(
+            f"() => {{ const before = window.scrollY; "
+            f"window.scrollBy(0, {SCROLL_STEP_PX}); "
+            f"return window.scrollY === before; }}"
+        )
+        await page.wait_for_timeout(SCROLL_STEP_WAIT_MS)
+        if reached_bottom:
+            break
+
+
 async def _wait_for_stable_prices(page) -> str:
-    """Poll page content until the count of rendered price labels stops growing."""
+    """Scroll through the page (prices lazy-render into view) then poll
+    page content until the count of rendered price labels stops growing."""
+    await _scroll_through_page(page)
     previous_count = -1
     content = await page.content()
     for _ in range(PRICE_POLL_MAX_ATTEMPTS):

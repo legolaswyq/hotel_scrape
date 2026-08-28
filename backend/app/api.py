@@ -1,7 +1,14 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
-from backend.app.models import ErrorResponse, SearchRequest, SearchResponse
+from backend.app.models import (
+    ErrorResponse,
+    SearchHistoryEntry,
+    SearchHistoryResponse,
+    SearchRequest,
+    SearchResponse,
+)
+from backend.app.scraper import search_result_store
 from backend.app.scraper.exceptions import (
     ScraperBlockedError,
     ScraperInterruptedError,
@@ -11,6 +18,29 @@ from backend.app.scraper.marriott import search
 from backend.app.scraper.marriott_prepay import check_prepay
 
 router = APIRouter()
+
+
+@router.get("/api/search-history", response_model=SearchHistoryResponse)
+async def search_history():
+    """Every search cached locally, most recently searched first, so the
+    frontend can offer them as one-click re-searches instead of the user
+    retyping location/dates."""
+    summaries = search_result_store.list_all()
+    return SearchHistoryResponse(
+        searches=[
+            SearchHistoryEntry(
+                location=s.location,
+                check_in=s.check_in,
+                check_out=s.check_out,
+                adults=s.adults,
+                rooms=s.rooms,
+                hotel_count=s.hotel_count,
+                prepay_checked_count=s.prepay_checked_count,
+                complete=s.complete,
+            )
+            for s in summaries
+        ]
+    )
 
 
 @router.post("/api/search", response_model=SearchResponse)

@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from backend.app.main import app
 from backend.app.models import Hotel
 from backend.app.scraper.exceptions import ScraperBlockedError, ScraperInterruptedError
+from backend.app.scraper.search_result_store import SearchSummary
 
 client = TestClient(app)
 
@@ -103,3 +104,59 @@ def test_search_returns_listing_when_prepay_check_is_blocked(mock_search, mock_c
 
     assert response.status_code == 200
     assert response.json()["hotels"][0]["name"] == "Test Hotel"
+
+
+@patch("backend.app.api.search_result_store.list_all")
+def test_search_history_returns_cached_queries_most_recent_first(mock_list_all):
+    mock_list_all.return_value = [
+        SearchSummary(
+            location="New York, NY",
+            check_in="2026-09-11",
+            check_out="2026-09-13",
+            adults=1,
+            rooms=1,
+            hotel_count=205,
+            prepay_checked_count=10,
+            complete=True,
+            searched_at=2.0,
+        ),
+        SearchSummary(
+            location="Chicago, IL",
+            check_in="2026-10-01",
+            check_out="2026-10-03",
+            adults=2,
+            rooms=1,
+            hotel_count=50,
+            prepay_checked_count=0,
+            complete=False,
+            searched_at=1.0,
+        ),
+    ]
+
+    response = client.get("/api/search-history")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "searches": [
+            {
+                "location": "New York, NY",
+                "check_in": "2026-09-11",
+                "check_out": "2026-09-13",
+                "adults": 1,
+                "rooms": 1,
+                "hotel_count": 205,
+                "prepay_checked_count": 10,
+                "complete": True,
+            },
+            {
+                "location": "Chicago, IL",
+                "check_in": "2026-10-01",
+                "check_out": "2026-10-03",
+                "adults": 2,
+                "rooms": 1,
+                "hotel_count": 50,
+                "prepay_checked_count": 0,
+                "complete": False,
+            },
+        ]
+    }

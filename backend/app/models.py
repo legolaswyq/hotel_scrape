@@ -35,5 +35,20 @@ class SearchResponse(BaseModel):
     hotels: list[Hotel]
 
 
+class SearchHistoryEntry(BaseModel):
+    location: str
+    check_in: str
+    check_out: str
+    adults: int
+    rooms: int
+    hotel_count: int
+    prepay_checked_count: int
+    complete: bool
+
+
+class SearchHistoryResponse(BaseModel):
+    searches: list[SearchHistoryEntry]
+
+
 class ErrorResponse(BaseModel):
     error: str

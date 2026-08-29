@@ -58,18 +58,15 @@ VIEW_RATES_RENDER_WAIT_MS = (2_000, 3_500)
 DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
 
-# Once the hotel list is known, checks run across several concurrent browser
-# sessions instead of one at a time -- each worker's SessionRotator starts
-# on its own freshly-generated random profile (see marriott._new_profile_dir),
-# so nothing needs to be pre-carved into per-worker slices; two workers
-# generating random profiles independently isn't going to collide. Workers
-# still throttle between their own checks (see module docstring) -- this
-# trades total wall-clock time for more concurrent "presence" against the
-# site, not for skipping the per-check delay. Kept at 2 (not higher) after
-# the 2026-08-27 block -- more concurrent sessions means more concurrent
-# "presence" from the same real IP, which is exactly what an IP-level
-# block cares about, unlike a session-level block.
-PREPAY_WORKER_COUNT = 2
+# How many concurrent browser sessions run prepay checks. Each worker's
+# SessionRotator starts on its own freshly-generated random profile (see
+# marriott._new_profile_dir), so raising this doesn't need any
+# pre-carved-out slices -- independently generated random profiles won't
+# collide. Kept at 1 (sequential, no concurrency) after the 2026-08-27
+# block -- more concurrent sessions means more concurrent "presence" from
+# the same real IP, which is exactly what an IP-level block cares about,
+# unlike a session-level block that profile/session rotation can help with.
+PREPAY_WORKER_COUNT = 1
 
 # Default cap on how many new hotels a single check_prepay() call checks --
 # callers that want more (e.g. the frontend's "check more" button) pass an

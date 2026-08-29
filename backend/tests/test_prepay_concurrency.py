@@ -100,7 +100,7 @@ class FakePlaywrightCtx:
         pass
 
 
-def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeypatch):
+def test_prepay_checks_all_hotels_across_configured_worker_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
     monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
     monkeypatch.setattr(marriott_prepay_module, "DELAY_MAX_SECONDS", 0.0)
@@ -121,10 +121,12 @@ def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeyp
     assert cached_checked == {"H1", "H2", "H3", "H4", "H5", "H6"}
     assert {h.code for h in cached_results} == set(PRICES)
 
-    # More than one browser session (profile dir) was used concurrently --
-    # not a single session churning through all six hotels serially.
-    assert len(fake_ctx.chromium.launched_profile_dirs) > 1
-    assert len(set(fake_ctx.chromium.launched_profile_dirs)) == len(fake_ctx.chromium.launched_profile_dirs)
+    # PREPAY_WORKER_COUNT distinct browser sessions (profile dirs) were
+    # used -- each worker launches its own, regardless of how many
+    # hotels it ends up checking.
+    dirs = fake_ctx.chromium.launched_profile_dirs
+    assert len(dirs) == PREPAY_WORKER_COUNT
+    assert len(set(dirs)) == len(dirs)
 
 
 def test_always_launches_exactly_worker_count_sessions_even_with_fewer_candidates(tmp_path, monkeypatch):

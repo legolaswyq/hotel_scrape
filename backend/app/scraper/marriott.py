@@ -224,6 +224,14 @@ class SessionRotator:
             channel="chrome",
             headless=False,
             no_viewport=True,
+            # Without this, patchright/Chromium launches every profile with
+            # --no-sandbox by default -- visible live as Chrome's own
+            # "unsupported command-line flag" banner, and a real, checkable
+            # automation signal that's identical across every rotated
+            # profile. Confirmed live 2026-08-30: this was showing on the
+            # blocked window regardless of rotation, since rotating to a
+            # new profile doesn't change this flag at all.
+            chromium_sandbox=True,
         )
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
 

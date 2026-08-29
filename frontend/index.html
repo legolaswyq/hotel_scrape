@@ -87,7 +87,9 @@
       <table id="results" hidden>
         <thead>
           <tr>
-            <th>Hotel</th><th>Room Type</th><th>Price / night</th><th>Total</th>
+            <th>Hotel</th><th>Room Type</th>
+            <th id="price-header" class="sortable">Price / night</th>
+            <th>Total</th>
             <th id="prepay-header" class="sortable">Prepay ▾</th>
             <th id="rmb-price-header" hidden>Price / night (¥)</th>
             <th id="rmb-total-header" hidden>Total (¥)</th>
@@ -111,6 +113,7 @@
     const resultsEl = document.getElementById("results");
     const resultsBody = resultsEl.querySelector("tbody");
     const prepayHeader = document.getElementById("prepay-header");
+    const priceHeader = document.getElementById("price-header");
     const checkMoreBtn = document.getElementById("check-more");
     const historyEl = document.getElementById("history");
     const historyList = historyEl.querySelector("ul");
@@ -126,7 +129,9 @@
     const discountTotalHeader = document.getElementById("discount-total-header");
 
     let currentHotels = [];
-    let prepaySortDescending = true;
+    // key: "prepay" or "price". For "prepay", descending means Yes-first;
+    // for "price", descending means highest first.
+    let sortState = { key: "prepay", descending: true };
     let lastSearchData = null;
     let rmbRate = null;
     let discountRate = null;
@@ -136,6 +141,37 @@
       if (hotel.supports_prepay === true) return 0;
       if (hotel.supports_prepay === false) return 1;
       return 2;
+    }
+
+    function compareByPrice(a, b) {
+      // Hotels with no known price always sort last, regardless of direction.
+      if (a.price_per_night == null && b.price_per_night == null) return 0;
+      if (a.price_per_night == null) return 1;
+      if (b.price_per_night == null) return -1;
+      const diff = a.price_per_night - b.price_per_night;
+      return sortState.descending ? -diff : diff;
+    }
+
+    function compareCurrent(a, b) {
+      if (sortState.key === "price") return compareByPrice(a, b);
+      const diff = prepayRank(a) - prepayRank(b);
+      return sortState.descending ? diff : -diff;
+    }
+
+    function updateSortHeaders() {
+      prepayHeader.textContent = sortState.key === "prepay" ? (sortState.descending ? "Prepay ▾" : "Prepay ▴") : "Prepay";
+      priceHeader.textContent =
+        sortState.key === "price" ? (sortState.descending ? "Price / night ▾" : "Price / night ▴") : "Price / night";
+    }
+
+    function setSort(key) {
+      if (sortState.key === key) {
+        sortState.descending = !sortState.descending;
+      } else {
+        sortState = { key, descending: true };
+      }
+      updateSortHeaders();
+      rerenderSorted();
     }
 
     function renderRows(hotels) {
@@ -176,12 +212,7 @@
     }
 
     function rerenderSorted() {
-      renderRows(
-        [...currentHotels].sort((a, b) => {
-          const diff = prepayRank(a) - prepayRank(b);
-          return prepaySortDescending ? diff : -diff;
-        })
-      );
+      renderRows([...currentHotels].sort(compareCurrent));
     }
 
     rmbCalculateBtn.addEventListener("click", () => {
@@ -208,11 +239,8 @@
       rerenderSorted();
     });
 
-    prepayHeader.addEventListener("click", () => {
-      prepaySortDescending = !prepaySortDescending;
-      prepayHeader.textContent = prepaySortDescending ? "Prepay ▾" : "Prepay ▴";
-      rerenderSorted();
-    });
+    prepayHeader.addEventListener("click", () => setSort("prepay"));
+    priceHeader.addEventListener("click", () => setSort("price"));
 
     function updateCheckMoreButton() {
       const uncheckedCount = currentHotels.filter((h) => h.supports_prepay == null).length;
@@ -236,9 +264,9 @@
 
     function showResults(hotels) {
       currentHotels = hotels;
-      prepaySortDescending = true;
-      prepayHeader.textContent = "Prepay ▾";
-      renderRows([...currentHotels].sort((a, b) => prepayRank(a) - prepayRank(b)));
+      sortState = { key: "prepay", descending: true };
+      updateSortHeaders();
+      rerenderSorted();
       resultsEl.hidden = false;
       rmbControls.hidden = false;
       discountControls.hidden = false;
@@ -341,9 +369,6 @@
       data.adults = Number(data.adults);
       data.rooms = Number(data.rooms);
       lastSearchData = data;
-
-      prepaySortDescending = true;
-      prepayHeader.textContent = "Prepay ▾";
 
       const limitValue = document.getElementById("prepay-limit").value;
       await runSearch(data, limitValue ? Number(limitValue) : null);

@@ -14,8 +14,12 @@ normal single search moments before was blocked even on a fresh plain
 request afterward, suggesting a session/IP-level penalty, not just a
 per-page check. There is no known safe rate. This module waits a
 randomized DELAY_MIN_SECONDS-DELAY_MAX_SECONDS between each check a single
-worker makes; if this still gets blocked, increase the delay further
-rather than adding more workers.
+worker makes, plus smaller randomized waits/mouse movement within each
+check (see _humanize) so actions don't land at identical, instant
+intervals. If this still gets blocked, increase the delay further or drop
+PREPAY_WORKER_COUNT rather than raising it -- an IP-level block cares
+about total concurrent presence from your real IP, which session/profile
+rotation can't help with.
 """
 
 import asyncio
@@ -41,9 +45,15 @@ PREPAY_CHUNK_SIZE = 6000
 # room-name heading is the closest one *before* it on the page.
 ROOM_NAME_RE = re.compile(r'<h3 class="standard room-name">([^<]+)</h3>')
 RATE_LOAD_TIMEOUT_MS = 20_000
-RATE_PAGE_HYDRATION_WAIT_MS = 3_000
 VIEW_RATES_CLICK_TIMEOUT_MS = 10_000
-VIEW_RATES_RENDER_WAIT_MS = 2_500
+
+# The "View Rates" button exists in the DOM right after domcontentloaded
+# but its click handler isn't wired up until the page's JS framework
+# finishes hydrating -- clicking immediately is a silent no-op (confirmed
+# by reproducing with/without a wait against the live site). Randomized
+# rather than a fixed wait -- see _humanize().
+RATE_PAGE_HYDRATION_WAIT_MS = (2_500, 4_500)
+VIEW_RATES_RENDER_WAIT_MS = (2_000, 3_500)
 
 DELAY_MIN_SECONDS = 6.0
 DELAY_MAX_SECONDS = 12.0
@@ -55,8 +65,11 @@ DELAY_MAX_SECONDS = 12.0
 # generating random profiles independently isn't going to collide. Workers
 # still throttle between their own checks (see module docstring) -- this
 # trades total wall-clock time for more concurrent "presence" against the
-# site, not for skipping the per-check delay.
-PREPAY_WORKER_COUNT = 3
+# site, not for skipping the per-check delay. Kept at 2 (not higher) after
+# the 2026-08-27 block -- more concurrent sessions means more concurrent
+# "presence" from the same real IP, which is exactly what an IP-level
+# block cares about, unlike a session-level block.
+PREPAY_WORKER_COUNT = 2
 
 # Default cap on how many new hotels a single check_prepay() call checks --
 # callers that want more (e.g. the frontend's "check more" button) pass an
@@ -72,6 +85,17 @@ def _room_type_before(page_html: str, idx: int) -> str | None:
     for match in ROOM_NAME_RE.finditer(page_html, endpos=idx):
         room_type = match.group(1)
     return room_type
+
+
+async def _humanize(page: Page) -> None:
+    """A few small, randomized actions -- move the mouse somewhere, nudge
+    the scroll position -- before the next real action, so the automation
+    doesn't look like a script clicking the same pixel at an identical
+    instant every single time. Deliberately doesn't catch errors here: if
+    the browser was closed mid-check, this is exactly where that should
+    surface (as a PatchrightError, same as any other page interaction)."""
+    await page.mouse.move(random.randint(100, 900), random.randint(100, 700), steps=random.randint(5, 15))
+    await page.mouse.wheel(0, random.randint(-150, 300))
 
 
 def _extract_prepay_offer(page_html: str) -> tuple[float, str | None] | None:
@@ -97,11 +121,8 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
     if response is not None and response.status == 403:
         raise ScraperBlockedError(f"Marriott returned 403 for {url}")
 
-    # The "View Rates" button exists in the DOM right after domcontentloaded
-    # but its click handler isn't wired up until the page's JS framework
-    # finishes hydrating -- clicking immediately is a silent no-op. Confirmed
-    # by reproducing with/without this wait against the live site.
-    await page.wait_for_timeout(RATE_PAGE_HYDRATION_WAIT_MS)
+    await page.wait_for_timeout(random.randint(*RATE_PAGE_HYDRATION_WAIT_MS))
+    await _humanize(page)
 
     try:
         await page.get_by_role("button", name="View Rates").first.click(
@@ -117,7 +138,8 @@ async def _check_hotel_prepay(page: Page, req: SearchRequest, code: str, name: s
             raise ScraperBlockedError(f"Marriott blocked the request for {url}") from exc
         return None
 
-    await page.wait_for_timeout(VIEW_RATES_RENDER_WAIT_MS)
+    await page.wait_for_timeout(random.randint(*VIEW_RATES_RENDER_WAIT_MS))
+    await _humanize(page)
     offer = _extract_prepay_offer(await page.content())
     if offer is None:
         return None
@@ -203,6 +225,16 @@ async def check_prepay(req: SearchRequest, hotels: list[Hotel], limit: int | Non
     nights = (req.check_out - req.check_in).days
     checked_codes, results = prepay_store.load(req)
 
+    # Results captured before Hotel gained a room_type field are stuck with
+    # supports_prepay=True and room_type=None forever otherwise -- a code
+    # already in checked_codes is normally treated as done and never
+    # re-checked. Force those back into the queue so a fresh check (which
+    # now captures room_type) can fill it in.
+    stale_codes = {h.code for h in results if h.code and h.supports_prepay and h.room_type is None}
+    if stale_codes:
+        checked_codes = checked_codes - stale_codes
+        results = [h for h in results if h.code not in stale_codes]
+
     candidates = [h for h in hotels if h.code and h.code not in checked_codes]
     batch = candidates[:limit] if limit is not None else candidates
 
@@ -221,9 +253,12 @@ async def check_prepay(req: SearchRequest, hotels: list[Hotel], limit: int | Non
 
         checked_codes, results = prepay_store.load(req)
 
-    supported_codes = {h.code for h in results if h.code}
+    results_by_code = {h.code: h for h in results if h.code}
     for hotel in hotels:
         if hotel.code in checked_codes:
-            hotel.supports_prepay = hotel.code in supported_codes
+            match = results_by_code.get(hotel.code)
+            hotel.supports_prepay = match is not None
+            if match is not None:
+                hotel.room_type = match.room_type
 
     return hotels

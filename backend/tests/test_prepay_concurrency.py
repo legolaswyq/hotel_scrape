@@ -38,6 +38,7 @@ def _rate_html(price: str | None) -> str:
     if price is None:
         return "<div>Flexible Rate only, no prepay here</div>"
     return (
+        '<h3 class="standard room-name">Guest room, 1 King</h3>'
         "<div>Prepay Non-refundable</div>"
         '<span class="rate-name">Member Rate</span>'
         '<a href="/rate-details">details</a>'
@@ -52,6 +53,7 @@ class FakePage:
         self.goto = self._goto
         self.wait_for_timeout = AsyncMock()
         self.title = AsyncMock(return_value="Where Can We Take You?")
+        self.mouse = type("Mouse", (), {"move": AsyncMock(), "wheel": AsyncMock()})()
 
         click_mock = AsyncMock()
         button = type("Button", (), {"first": type("First", (), {"click": click_mock})()})()
@@ -112,6 +114,7 @@ def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeyp
     result_by_code = {h.code: h for h in result}
     for code in PRICES:
         assert result_by_code[code].supports_prepay is True
+        assert result_by_code[code].room_type == "Guest room, 1 King"
     assert result_by_code["H4"].supports_prepay is False
 
     cached_checked, cached_results = prepay_store.load(REQ)
@@ -125,9 +128,9 @@ def test_prepay_checks_run_across_multiple_concurrent_sessions(tmp_path, monkeyp
 
 
 def test_always_launches_exactly_worker_count_sessions_even_with_fewer_candidates(tmp_path, monkeypatch):
-    """PREPAY_WORKER_COUNT (3) browser sessions must spin up regardless of
-    batch size -- even a single hotel to check launches 3 sessions (the
-    other 2 just find an empty queue and exit immediately), rather than
+    """PREPAY_WORKER_COUNT browser sessions must spin up regardless of
+    batch size -- even a single hotel to check launches all of them (the
+    rest just find an empty queue and exit immediately), rather than
     scaling worker count down with the batch."""
     monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
     monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
@@ -162,3 +165,28 @@ def test_second_call_with_limit_only_checks_new_hotels(tmp_path, monkeypatch):
 
     cached_checked, _ = prepay_store.load(REQ)
     assert cached_checked == {"H1", "H2", "H3", "H4", "H5", "H6"}
+
+
+def test_stale_cache_entry_missing_room_type_gets_rechecked(tmp_path, monkeypatch):
+    """A prepay result saved before Hotel gained room_type (supports_prepay
+    True, room_type None) must not stay stuck that way forever just
+    because its code is already in checked_codes -- it should be forced
+    back into the queue and picked up on the next call."""
+    monkeypatch.setattr(prepay_store, "DATA_DIR", tmp_path / "prepay_cache")
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(marriott_prepay_module, "DELAY_MAX_SECONDS", 0.0)
+
+    stale_hotel = Hotel(
+        name="One", price_per_night=469.0, total_price=938.0, currency="USD", code="H1", supports_prepay=True
+    )
+    prepay_store.save(REQ, {"H1"}, [stale_hotel])
+
+    fake_ctx = FakePlaywrightCtx()
+    monkeypatch.setattr(marriott_prepay_module, "async_playwright", lambda: fake_ctx)
+
+    hotels = [HOTELS[0].model_copy()]
+    result = asyncio.run(check_prepay(REQ, hotels))
+
+    assert result[0].room_type == "Guest room, 1 King"
+    _, cached_results = prepay_store.load(REQ)
+    assert cached_results[0].room_type == "Guest room, 1 King"
